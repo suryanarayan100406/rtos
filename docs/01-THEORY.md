@@ -15,17 +15,40 @@ no prior photogrammetry expertise required.
   angles, the epipole inside the frame, no loop closures — so triangulation-first reconstruction is
   *mathematically ill-conditioned*. This single fact motivates the whole system.
 - DRISHTI answers it with the four anchors: **A1 prior-assisted geometry** (learned depth + pointmaps
-  supply structure where triangulation degenerates), **A2 metric spine** (a tightly-coupled
-  GNSS+IMU+visual factor graph makes metric scale *observable* without Ground Control Points),
-  **A3 two output paths** (near-real-time edge preview + minutes-scale ground refinement), and
-  **A4 reliability spine** (every stage emits confidence; nothing hard-fails).
-- **Metric scale is the crux.** A single monocular image fixes shape only *up to scale*; the
-  Inertial Measurement Unit (IMU) and Global Navigation Satellite System (GNSS) inject the metre.
+  supply structure where triangulation degenerates), **A2 metric spine** (a factor graph over
+  **visual + GNSS** factors — IMU, barometer and RTK/PPK fused when available — makes metric scale
+  *observable* without Ground Control Points), **A3 two output paths** (near-real-time edge preview +
+  minutes-scale ground refinement), and **A4 reliability spine** (every stage emits confidence;
+  nothing hard-fails).
+- **Metric scale is the crux.** A single monocular image fixes shape only *up to scale*. The official
+  input contract makes only **video + GPS + flight metadata mandatory**, so the honest baseline injects
+  the metre from **GNSS baselines + visual structure** with **self-calibrated intrinsics**; an Inertial
+  Measurement Unit (IMU) — gravity-referenced acceleration — and RTK/PPK are *optional* enhancers that
+  tighten scale observability when present. §8 derives both cases.
 - **Georeferencing is a datum problem, not a scaling problem** — ellipsoidal-to-orthometric height
   via a geoid model is where naive pipelines silently lose tens of metres.
 - Every learned output carries a **confidence signal**; occluded and completed surfaces are flagged
   *inferred*, never presented as measured. Accuracy is reported with ASPRS-style RMSE and confidence
-  levels, and depends on sensor configuration (RTK/PPK vs GPS-only).
+  levels, and depends on sensor configuration (RTK/PPK vs GPS-only) — measured against the official
+  **≤ 1 m** bar, with any region past it flagged rather than averaged away.
+- **Licensing is part of the theory-to-practice step.** Military reconnaissance is in scope, so the
+  restricted checkpoints discussed below (VGGT, DUSt3R/MASt3R, UniDepth V2) are cited as **science and
+  reference only**; the shipped stack is permissive throughout (Depth Anything 3, MapAnything, Pi3,
+  Metric3D v2, gsplat, GLOMAP/COLMAP).
+- **The theory has a deadline, and that is a mathematical constraint rather than a scheduling one.** The
+  official bar is a finished model in **< 15 minutes for a 10-minute video**, at **≤ 1 m** spatial
+  accuracy, over the *entire visible scene*. An estimator that is correct but asymptotically
+  unaffordable fails the brief, so computational cost is treated here as part of each method's
+  justification — §4 (Hessian sparsity, the Schur complement, and global-before-incremental), §6–§7
+  (feed-forward inference as a fixed-cost substitute for iteration), §11 (rasterised rather than
+  ray-marched radiance).
+- **Which theory earns its place is decided by a weighted rubric**, not by elegance: reconstruction
+  accuracy **30%**, model completeness **20%**, processing speed **20%**, innovation **15%**,
+  scalability **10%**, user interface **5%** — quoted verbatim in the problem statement, §1a. Half of
+  those marks rest on the accuracy argument of §13 and the completeness argument of §14, and a fifth on
+  the cost bounds above. The output side of the brief — OBJ, PLY, LAS, GeoTIFF, glTF/GLB and `.fbx`,
+  opened in a web or desktop viewer — is why §10's datum mathematics must hold in *every* exported
+  representation, not merely in one canonical product.
 
 This document explains *why* each choice is correct. The pipeline itself (tiers, stages S0–S10, model
 registry) is defined once in the canonical architecture spec; here we give the mathematics that each
@@ -61,8 +84,10 @@ normalized coordinates `(x_n, y_n) = (X_c/Z_c, Y_c/Z_c)`, `r² = x_n² + y_n²`:
 x_d = x_n (1 + k1 r² + k2 r⁴ + k3 r⁶) + [2 p1 x_n y_n + p2 (r² + 2 x_n²)]   (radial + tangential)
 ```
 
-then `K` maps `(x_d, y_d)` to pixels. Intrinsics come from EXIF or self-calibration (stage S0/S6);
-UniDepthV2 and MoGe can even *predict* focal length when metadata is absent.
+then `K` maps `(x_d, y_d)` to pixels. Because camera intrinsics are an **optional** input under the
+official contract, **self-calibration (stages S0/S6) is the default path**, with EXIF used only as an
+initial guess when present; MoGe and Depth Anything 3 can even *predict* focal length when metadata is
+absent (UniDepthV2 does likewise but is reference-only — CC BY-NC-SA).
 
 **Ground Sampling Distance (GSD)** — the physical size a pixel covers on the ground — falls straight
 out of the pinhole similar triangles:
@@ -166,8 +191,21 @@ determined only up to a global **similarity transform** — 3 rotation + 3 trans
 DoF. `H` is therefore rank-deficient by 7 and needs external constraints to pin. Monocular SfM cannot
 recover absolute scale from images at all (§6). Second, the Hessian is **sparse** (points and cameras
 interact only through shared observations), so the Schur complement makes even large problems
-tractable. DRISHTI resolves the gauge with the metric spine's GNSS/IMU factors rather than with GCPs,
-and keeps the posterior covariance for the accuracy report (§13).
+tractable. DRISHTI resolves the gauge with the metric spine's **GNSS factors** — the positioning input
+the brief guarantees — reinforced by IMU and RTK/PPK factors where those optional sensors are fitted,
+rather than with GCPs, and keeps the posterior covariance for the accuracy report (§13).
+
+**Cost, and why it decides the architecture.** Solving the normal equations after the Schur complement
+reduces onto the camera block costs on the order of `n_c³` in the number of cameras (plus a term linear
+in points), so BA grows super-linearly in views — and **incremental** SfM compounds that by
+re-triangulating and re-optimising after each added image, which is why classical pipelines routinely
+take hours on a 10-minute clip. Two theoretical moves buy the deadline back. First, **global
+positioning before refinement** (the GLOMAP-style route): recover all camera positions in one global
+step and reserve BA for a bounded number of final iterations instead of interleaving thousands.
+Second, **feed-forward initialisation** (§7): a network emits a globally consistent pointmap in a single
+forward pass, so BA begins inside the basin of the correct minimum and converges in few iterations. The
+reprojection objective above is unchanged by either move; what changes is *how many times it must be
+evaluated* — which is precisely the quantity the < 15 minute ceiling constrains.
 
 ---
 
@@ -199,10 +237,11 @@ unobservable from one monocular view** — the scale-ambiguity theorem, and the 
 carries the 7th gauge DoF of §4.
 
 Learned **metric depth** networks break the ambiguity by supplying a prior on real-world size.
-Metric3D v2 maps any camera into a *canonical camera space* so it can regress absolute-scale depth
-zero-shot; UniDepthV2 predicts a metric point cloud *and* the intrinsics together; Depth Anything V2
-(metric variants) does likewise from its large-scale prior. In effect they have learned how big cars,
-roads, and buildings usually are. DRISHTI uses these at stage S4.
+Metric3D v2 (CC BY 4.0 — shipped) maps any camera into a *canonical camera space* so it can regress
+absolute-scale depth zero-shot; Depth Anything 3 (shipped) does likewise from its large-scale prior;
+UniDepthV2 predicts a metric point cloud *and* the intrinsics together but is **reference-only**
+(CC BY-NC-SA, unusable in a military-scope deployment). In effect they have learned how big cars,
+roads, and buildings usually are. DRISHTI uses the permissive pair at stage S4.
 
 Two honesty caveats, carried through the design. Per-frame metric depth has a **real domain gap** at
 oblique/nadir drone altitudes — the models are trained mostly on ground-level and driving data — so
@@ -237,8 +276,10 @@ well-conditioned precisely where parallax vanishes and the classical Jacobian go
 its risk: in genuinely unseen regions the network can *hallucinate plausible-but-wrong* geometry
 (§14), so its confidence must gate measurement. DRISHTI uses feed-forward geometry to seed depth and
 poses (S4), to keep global optimisation consistent (S6), and to initialise Gaussian Splatting (S7).
-Note the licensing constraint flagged in Open questions: VGGT's commercial checkpoint excludes
-military use, so an NTRO build favours MASt3R/permissive or retrained equivalents.
+Note the licensing constraint flagged in Open questions, and note it cuts deeper than VGGT alone:
+VGGT's commercial checkpoint excludes military use, **and DUSt3R/MASt3R are CC BY-NC** — so for an
+NTRO build this entire family is **reference-only**. The shipped feed-forward backbone is permissive:
+**Depth Anything 3, MapAnything, Pi3** (with GLOMAP/COLMAP as the classical fallback).
 
 ---
 
@@ -409,7 +450,8 @@ overfitting in disguise, and it is the single-pass regime by construction. DRISH
 as the theory prescribes (stage S7): **depth regularization** (tie Gaussian depth to the metric depth
 prior of §6, à la FSGS/DNGaussian), **normal regularization** (2DGS surfel consistency), **per-image
 appearance embeddings** (absorb illumination/shadow drift so it is not baked into geometry), and
-**confidence-aware** initialisation from feed-forward pointmaps (InstantSplat from VGGT/MASt3R).
+**confidence-aware** initialisation from feed-forward pointmaps (InstantSplat-style, seeded from the
+permissive backbone — Depth Anything 3 / MapAnything / Pi3 — rasterised with gsplat).
 Regularised, few-shot GS becomes well-posed enough to yield a measurable surface.
 
 ---
@@ -504,14 +546,17 @@ uncertainty/completeness report, and degrades gracefully rather than fabricating
 
 ## Open questions / risks
 
-- **Aerial domain gap.** Metric depth and feed-forward geometry models (Metric3D v2, UniDepth, VGGT,
-  MASt3R) are trained mostly on ground-level/driving/indoor data; nadir/oblique drone views are
-  out-of-distribution. Published KITTI/NYU accuracy will not transfer directly — aerial fine-tuning
-  and validation are needed before any metric claim.
-- **Scale drift & excitation.** IMU scale observability requires motion excitation; smooth,
-  constant-velocity survey flight leaves scale weakly observable, and per-frame metric depth (5–10%
-  error) drifts. Per-keyframe scale correction in the factor graph is essential and not yet validated
-  on real drone data.
+- **Aerial domain gap.** Metric depth and feed-forward geometry models (Metric3D v2, Depth Anything 3,
+  MapAnything, Pi3 — and the reference-only VGGT/MASt3R/UniDepth family) are trained mostly on
+  ground-level/driving/indoor data; nadir/oblique drone views are out-of-distribution. Published
+  KITTI/NYU accuracy is *as reported by those methods' authors* and will not transfer directly —
+  aerial fine-tuning and validation are needed before any metric claim of ours.
+- **Scale drift & excitation.** Where an IMU *is* present, scale observability requires motion
+  excitation; smooth, constant-velocity survey flight leaves it weakly observable, and per-frame metric
+  depth (5–10% error) drifts. On the **mandatory-only baseline there is no IMU at all**, so scale rests
+  entirely on GNSS baselines + visual structure — making GNSS-baseline geometry (flight length, turn
+  diversity) the dominant scale-conditioning factor. Per-keyframe scale correction in the factor graph
+  is essential in both cases and not yet validated on real drone data.
 - **Vertical bias without a checkpoint.** Residual boresight/lever-arm and calibration error produce a
   10–30 cm systematic vertical bias even with RTK. Sub-decimetre vertical effectively requires one
   checkpoint or a precise geoid + calibrated boresight — this tension between "GCP-free" and
@@ -519,11 +564,14 @@ uncertainty/completeness report, and degrades gracefully rather than fabricating
 - **Hallucination vs measurement.** Feed-forward geometry, few-shot 3DGS, and learned completion can
   emit plausible-but-wrong surfaces. The confidence-gating and inferred-region flagging described in
   §13–§14 are load-bearing; their *calibration* on aerial data is an open task.
-- **Licensing for defense.** VGGT's commercial checkpoint excludes military use and several strong
-  depth checkpoints are non-commercial (CC-BY-NC); Ultralytics YOLO is AGPL-3.0. An NTRO-deployable
-  build must favour permissive/BSD components (GTSAM, Metric3D BSD-2, SuperPoint/LightGlue Apache,
-  RoMa MIT, DROID-SLAM BSD) or retrained/licensed equivalents. This is flagged consistently with the
-  canonical spec's model registry.
+- **Licensing for defense.** This is settled policy, not an open question, and it binds hard because
+  military reconnaissance is an explicit application: VGGT's commercial checkpoint excludes military
+  use, DUSt3R/MASt3R and UniDepth V2 are CC BY-NC/NC-SA, and Ultralytics YOLO is AGPL-3.0 — **all
+  reference-only**. The NTRO-deployable build ships permissive components exclusively: **Depth
+  Anything 3, MapAnything, Pi3, Metric3D v2, gsplat, GLOMAP/COLMAP, RT-DETR, SAM2**, plus GTSAM (BSD)
+  and SuperPoint/LightGlue (Apache). What remains open is only the *accuracy cost* of that
+  substitution, which must be quantified. Consistent with the canonical spec's model registry.
+
 - **Rolling shutter & compression.** The theory above largely assumes a global-shutter pinhole; real
   input is rolling-shutter, motion-blurred, H.264/H.265-compressed video. Unmodelled rolling shutter
   biases geometry at UAV speed; rolling-shutter-aware BA or a global-shutter sensor may be required to
@@ -531,13 +579,23 @@ uncertainty/completeness report, and degrades gracefully rather than fabricating
 - **Ground-truth for validation.** Proving accuracy *without* GCPs still needs an independent check
   (a few survey points, RTK, or reference LiDAR/photogrammetry). Accuracy figures in this document are
   design targets until measured on such a reference.
+- **Affordability of the whole chain is an open question in its own right.** Every complexity argument
+  above is asymptotic, whereas **< 15 minutes for a 10-minute video** is a statement about *constants*
+  on real 4K aerial input — and those constants are unmeasured. The honest theoretical claim is only
+  that no step in the pointmap → global-solve → splat → mesh chain is super-linear in a way that
+  *forbids* the bound; whether it *meets* the bound on one GPU is a measurement the systems role owns,
+  not something this document can derive.
 
 ## Further reading
 
 - **Canonical architecture spec** — tiers, stages S0–S10, model registry, reliability/metric spines,
   accuracy budget. The mathematics here maps stage-by-stage onto that pipeline (S2/S6 → §8, §4; S4 →
   §6, §7; S5/S8 → §12; S7 → §11, §14; S9 → §10; S10 → §13).
-- **Problem statement** — Desired Output and Evaluation Criteria tables that these foundations serve.
+- **Problem statement** — the official Desired Output (**≤ 1 m** spatial accuracy, **< 15 min** for a
+  10-minute video, entire visible scene, exports in OBJ · PLY · LAS · GeoTIFF · glTF/GLB · `.fbx`, and a
+  web or desktop viewer) together with the weighted Evaluation Criteria these foundations serve — both
+  quoted verbatim in its §1a.
+
 - Hartley & Zisserman, *Multiple View Geometry in Computer Vision* (pinhole, epipolar, triangulation,
   BA gauge freedom).
 - Forster et al., *On-Manifold IMU Preintegration* (T-RO 2017); Dellaert & Kaess, *Factor Graphs for

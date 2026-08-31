@@ -24,14 +24,39 @@ software.
   time, interpolate the RTK/Post-Processed-Kinematic (PPK) trajectory and gimbal/IMU attitude onto that
   epoch, and apply the antenna→camera lever arm. Per-frame position error ≈ `sync_error × ground_speed`,
   so we target **frame-to-GNSS sync < 2–3 ms**.
+- **The official input contract is a hardware constraint, and it is generous to us in exactly one
+  direction only.** Only **drone video (1080p/4K), GPS coordinates and flight metadata** are *mandatory*;
+  **IMU, barometric altitude, camera intrinsics and RTK/PPK are all optional**. So the sensor suite below
+  is the *ideal* instrument, not a prerequisite: the pipeline must run on a video + a GPS log from an
+  unknown airframe, with intrinsics self-calibrated. This role therefore owns two jobs — specify the good
+  instrument, **and** define what S0 emits when most of it is absent (§4, §9).
 - Honesty (per [`PROBLEM_STATEMENT`](../_internal/PROBLEM_STATEMENT.md) §4): **"metric without Ground
-  Control Points (GCPs)"** = fused GNSS(+RTK/PPK)+IMU+visual scale, sensor-configuration-dependent, with
-  the **vertical axis as the weak axis** (a ~5–30 cm bias typically needs one checkpoint).
+  Control Points (GCPs)"** = fused GNSS + visual scale (with RTK/PPK and IMU folded in when fitted),
+  sensor-configuration-dependent and measured against the official **≤ 1 m** bar, with the **vertical
+  axis as the weak axis** (a ~5–30 cm bias typically needs one checkpoint, and any region past 1 m is
+  flagged rather than averaged away).
 - **Store-and-forward** is non-negotiable: near-raw H.265 + full-rate telemetry are recorded to onboard
   Non-Volatile Memory express (NVMe) so a dropped link loses only the live preview, never the mission —
   the accurate model is built from the guaranteed recording (reliability spine A4).
 - The single-pass capture Standard Operating Procedure (SOP) is deliberately **not** multi-pass
-  photogrammetry: oblique gimbal, slow/steady flight, ≥90% along-track overlap, fixed intrinsics.
+  photogrammetry: oblique gimbal, slow/steady flight, ≥90% along-track overlap, intrinsics held stable
+  through the pass (locked zoom/focus) so self-calibration has one consistent camera to solve for.
+- **Turn diversity is now an accuracy requirement, not a nicety.** With no IMU on the mandatory-only
+  configuration, metric scale rests on GNSS-baseline geometry, so the SOP asks for gentle heading and
+  altitude variation across the pass. A dead-straight, constant-height line is the worst case for scale
+  observability and the SOP says so (§8).
+- **Capture parameters are the pipeline's cost function, so this role co-owns the < 15 minute ceiling.**
+  The official bar is a finished model in **< 15 minutes for a 10-minute video**, and the ground tier's
+  cost scales with *keyframe count × resolution* — both decided in the air by speed, altitude, overlap and
+  capture resolution. A 90%-overlap 4K pass at 5 m/s hands downstream several times the work a leaner
+  profile would, so the SOP states a target keyframe density explicitly (§8) instead of leaving it a
+  by-product. The other speed lever this role owns is the **mid-flight head-start**: keyframe packages
+  stream while the aircraft is still flying (§6), so the ground tier can begin refining before landing.
+- **On the official rubric this role's evidence is indirect but load-bearing.** Frame-to-GNSS sync and
+  lever-arm/boresight discipline feed **reconstruction accuracy (30%)**; the coverage SOP feeds **model
+  completeness (20%)**; capture resolution and the head-start uplink feed **processing speed (20%)**. What
+  this role publishes for the record is the *capture configuration* — `sensor_caps`, sync residual, fix
+  quality, overlap achieved — because none of those three scores is interpretable without it (§9).
 
 > The authoritative pipeline (three tiers, stages S0–S10, model choices, the metric spine A2 and
 > reliability spine A4) is defined once in
@@ -48,11 +73,17 @@ clock. Our mandate is to make that assumption true, and to be honest in the heal
 is not.
 
 We own the capture system end-to-end and stage **S0 (Capture & Sync)** as defined in the spec: hardware
-time-stamping, aligning every frame to IMU/GNSS/barometer on a common clock, logging intrinsics or
-triggering self-calibration, and emitting per-sample quality flags. The output is the **time-
-synchronized sensor stream** that S1 (Ingest & Frame QA) and S2 (Odometry & Localization) consume — in
-message terms, the `Keyframe` contract carrying capture timestamp, pose prior, intrinsics, and
-confidence (see [Integration](../04-INTEGRATION.md) §2).
+time-stamping, aligning every frame to **GNSS and flight metadata** on a common clock — adding IMU and
+barometer to that alignment *when those optional sensors exist* — **defaulting to self-calibrated
+intrinsics** and using an operator-supplied calibration only as an initial guess, and emitting
+per-sample quality flags. The output is the **time-synchronized sensor stream** that S1 (Ingest & Frame
+QA) and S2 (Odometry & Localization) consume — in message terms, the `Keyframe` contract carrying
+capture timestamp, pose prior, intrinsics, a **`sensor_caps` capability flag** naming which optional
+sensors were actually present, and confidence (see [Integration](../04-INTEGRATION.md) §2).
+
+That capability flag is this role's most important single output. Every downstream stage branches on it,
+so S0 must never fake a sensor it did not have: a missing IMU is reported as absent, not silently
+substituted with a zero-rate stream.
 
 Boundaries with peers are drawn to avoid overlap:
 
@@ -195,11 +226,15 @@ sequenceDiagram
   end
 ```
 
-**Intrinsics logging.** For the stills/EXIF path we pull DJI's calibrated focal, principal point, and
-DewarpData distortion from EXIF/XMP. For video (no per-frame EXIF) we inject a single fixed intrinsic
-model from a pre-flight calibration (§5) and **fix** it downstream rather than free-solving — the
-specific change that stabilizes weak single-pass bundle adjustment. Where none is available, S0 flags
-the frames for self-calibration in S6.
+**Intrinsics logging.** Camera intrinsics are an **optional** input, so S0 handles three cases and says
+which one it is. (1) Stills/EXIF path: pull DJI's calibrated focal, principal point, and DewarpData
+distortion from EXIF/XMP. (2) Our own aircraft: inject a single intrinsic model from the pre-flight
+calibration (§5) as a **strong prior** — `intrinsics_fixed = true` where the optics are genuinely locked,
+which is the specific change that stabilizes weak single-pass bundle adjustment. (3) **Default, and the
+only case the official contract guarantees:** no calibration and no usable EXIF, so S0 emits
+`intrinsics_fixed = false` with a focal-length estimate from the depth backbone as an initial guess, and
+S6 **self-calibrates**. Case 3 is a supported path, not a flag-and-hope; what S0 must never do is present
+a guessed intrinsic model as a measured one.
 
 **Per-sample quality flags.** Each sample carries validity: GNSS fix type (single/float/RTK-fix) and
 Horizontal Dilution of Precision (HDOP), IMU saturation/clipping, gimbal-encoder validity, and a
@@ -216,13 +251,19 @@ observable so Geospatial can down-weight it.
 
 ## 5. Calibration
 
-Calibration is where single-pass reconstruction is quietly won or lost. A single straight strip cannot
-reliably self-calibrate — free focal length trades against depth/scale and produces systematic "doming."
-So we supply strong, pre-measured priors and fix them.
+Calibration is where single-pass reconstruction is quietly won or lost. A single straight strip is the
+hard case for self-calibration — free focal length trades against depth/scale and produces systematic
+"doming." So wherever we own the aircraft we supply strong, pre-measured priors; and because calibration
+is an **optional** input under the official contract, we also make the un-calibrated path work rather
+than merely tolerating it (ADR-16 in [Design Decisions](../05-DESIGN-DECISIONS.md)).
 
 - **Camera intrinsics.** Pre-flight OpenCV checkerboard calibration of the exact camera/zoom/focus,
   targeting reprojection error < 0.3 px (design target on a good board), or DJI EXIF/XMP DewarpData for
-  the stills path. Intrinsics are **fixed** in bundle adjustment, not free-solved.
+  the stills path. Where that calibration exists and the optics are locked, intrinsics enter bundle
+  adjustment **tightly constrained** rather than free-solved. Where it does not — the guaranteed
+  mandatory-only case — S6 solves them, initialized from the depth backbone's focal estimate and
+  conditioned by the turn/altitude diversity the SOP asks for (§8); the accuracy report then states that
+  the pass was self-calibrated.
 - **Camera↔IMU extrinsics + temporal offset.** Solved once with **Kalibr** (AprilGrid), with
   `allan_variance_ros` / `imu_utils` for the IMU noise model; Kalibr recovers the temporal offset to
   ~1 ms and extrinsic rotation to < 0.5° given a well-excited sequence. This is a **custom-rig-only**
@@ -231,10 +272,14 @@ So we supply strong, pre-measured priors and fix them.
 - **Gimbal boresight & GNSS lever arm.** Measure the antenna→camera lever arm (typically 10–20 cm) to
   **1–2 cm** and the gimbal mounting boresight; an unmodeled lever arm biases the *entire* model. These
   are recorded in mission config and handed to Geospatial.
-- **Pre-calibrate vs self-calibrate.** Pre-calibrate whenever the optics are stable (fixed lens/zoom):
-  it is the specific stabilizer for single-pass. Self-calibrate (in S6) only as a fallback — flagged as
-  reduced-confidence — when intrinsics are unknown, or to absorb temperature/focus drift on a long
-  mission.
+- **Pre-calibrate vs self-calibrate — which is the default depends on who owns the aircraft.** Camera
+  intrinsics are an **optional** input under the official contract, so **self-calibration (S6) is the
+  system default** and must be first-class: unknown intrinsics is the configuration we are guaranteed to
+  face, not an exception. Where *we* fly the aircraft, pre-calibration is the specific stabilizer for
+  single-pass and we take it — locked lens/zoom, verified reprojection error, intrinsics passed as a
+  strong prior rather than a hard constraint so S6 can still absorb thermal/focus drift. Where we are
+  handed someone else's video, S6 solves intrinsics outright and the accuracy report states that the
+  pass was self-calibrated. Both paths are supported; neither is labelled a failure.
 
 **Pre-mission SOP (calibration).** (1) Verify lens/zoom/focus locked; (2) run OpenCV intrinsics on the
 day's rig, confirm reprojection < 0.3 px; (3) confirm Kalibr cam–IMU YAML is current (re-run after any
@@ -263,6 +308,14 @@ independent of the radio. On link loss the buffer persists and the live preview 
 never stops**; on reconnect or after landing the gap is backfilled so the Ground Tier sees a complete
 stream (reliability ladder, `Always` row). Where no correction link exists (borders, disaster zones), we
 log RINEX and rely on PPK — the link-independent anchor.
+
+**The link is also a speed mechanism, not only a resilience one.** Because keyframe packages (pose priors
++ downsampled depth + masks + confidence) flow up *during* the flight, the Ground Tier can start S6/S7 on
+the earliest keyframes before the aircraft lands — which is the difference between the **< 15 minute**
+clock starting at landing and starting shortly after take-off. When the link is poor the clock simply
+starts later and the ground tier's deadline scheduler absorbs it
+([Systems & Edge/Compute](6-systems-edge-compute-optimization.md) §2); the mission itself is never at
+risk, because the master recording is onboard either way.
 
 | Data | Onboard NVMe (master) | Downlink (SRT) — indicative budget |
 |------|----------------------|--------------------------------------|
@@ -329,7 +382,23 @@ lawnmower grid:
   dramatically improves self-consistency and kills the "bowl"/doming error — far cheaper than a full
   second pass.
 - **Fast/mechanical (or global) shutter, ≥ 1/1000 s** to keep motion blur under a pixel (§3).
-- **Fixed intrinsics** from pre-flight calibration (§5), not SfM self-calibration.
+- **Intrinsics held stable through the pass** — locked lens/zoom/focus so there is one consistent camera
+  to solve for. Where pre-flight calibration exists (§5) it is passed as a strong prior; where it does
+  not, S6 self-calibrates, which is the default for third-party footage.
+- **Gentle heading and altitude variation across the pass.** With no IMU (the mandatory-only
+  configuration) metric scale rests on GNSS-baseline geometry, so a dead-straight constant-height line is
+  the worst case for scale observability. A lazy S-curve or a slow altitude ramp costs nothing and
+  conditions the scale solution.
+
+**The SOP is a deadline decision as well as an accuracy one.** Every parameter above prices the ground
+tier's work: at 5–8 m/s with ≥ 90% along-track overlap a 10-minute pass yields on the order of a few
+hundred usable keyframes, S4→S8 cost is roughly linear in that count, and depth and texture cost scale
+with resolution. The SOP therefore carries a **target keyframe density** — a working figure of ~2–4
+keyframes per second of flight at 4K, to be tightened once the ground tier's throughput is measured — so
+that a longer or faster pass is traded off *in the flight plan* rather than discovered as a missed
+**< 15 minute** deadline after landing. Flying 4K rather than 1080p is likewise a deliberate purchase of
+ground-sample distance at a known cost in processing time, and it goes in the mission log because the
+accuracy report has to state which was flown.
 
 **Honest single-pass constraints.** Occlusion is *inherent* to one viewpoint set — backsides and
 grazing-angle surfaces cannot be triangulated and will be flagged low-confidence or filled by learned
@@ -348,7 +417,9 @@ ladder (spec §5), and each is *detected*, *flagged*, and *acted on* rather than
 
 | Trigger (this role detects) | Detection signal | Response | Ladder |
 |-----------------------------|------------------|----------|--------|
-| No RTK/PPK correction | `gnss_fix_type` leaves RTK-fix | Continue GNSS+IMU+VIO scale; flag reduced georef; defer to PPK | **L1** |
+| No RTK/PPK correction, or none fitted (it is *optional*) | `gnss_fix_type` leaves RTK-fix, or the `sensor_caps` RTK bit is unset | Continue on GNSS + visual scale (plus IMU where fitted); flag reduced georef; defer to PPK if RINEX was logged | **L1** |
+| No IMU fitted (mandatory-only capture) | `sensor_caps` IMU bit unset | Emit keyframes with no attitude prior and no gravity vector; S2 runs visual odometry scaled by GNSS baselines — the **default path, not a fallback**; report wider vertical uncertainty | **L1** |
+| No camera intrinsics supplied (they are *optional*) | no calibration file, no usable EXIF | `intrinsics_fixed = false`; S6 self-calibrates; flag the pass as self-calibrated in the accuracy report | **L1** |
 | GNSS dropout (canyon / denied / jammed) | fix = 0, HDOP spikes | VIO+IMU dead-reckon; re-anchor on GNSS re-acquire | **L2** |
 | Brief visual loss (blur/occlusion) | frame QA + IMU cross-check | IMU inertial propagation; short gap flagged high-uncertainty | **L3** |
 | PPS absent / clock sync lost | `clock_sync_residual_ms` over budget | Software timestamp interpolation; raise temporal-uncertainty flag; post-hoc IMU/flow correlation | S0 fallback |
@@ -358,8 +429,10 @@ ladder (spec §5), and each is *detected*, *flagged*, and *acted on* rather than
 **What this role guarantees downstream.** (1) Every sample is stamped on a single GPS-disciplined clock
 and carries a validity + temporal-uncertainty flag. (2) The onboard recording is **complete** regardless
 of link or compute pressure (store-and-forward), so the accurate model is always recoverable. (3) The
-calibration set — fixed intrinsics, Kalibr cam–IMU extrinsics, lever arm, boresight — is delivered and
-versioned into the project bundle. (4) RTK-fix→float and GNSS-denied transitions are surfaced as fix-
+calibration set — intrinsics (measured where available, self-calibrated otherwise), Kalibr cam–IMU
+extrinsics, lever arm, boresight — is delivered and versioned into the project bundle, each entry marked
+measured or solved so nothing downstream mistakes an estimate for a measurement.
+ (4) RTK-fix→float and GNSS-denied transitions are surfaced as fix-
 quality flags so Geospatial can down-weight or hand those frames to PPK. These are the honest inputs the
 metric spine (A2) needs; the numeric fusion and CRS/geoid handling belong to
 [Geospatial & Accuracy](5-geospatial-accuracy-research.md).
@@ -368,9 +441,11 @@ metric spine (A2) needs; the numeric fusion and CRS/geoid handling belong to
 
 ## 10. Hackathon Minimum-Viable-Product (MVP) responsibilities
 
-The event provides a dataset (drone video + GPS + flight metadata), not a drone. So this role does not
-fly hardware at the hackathon — it **demonstrates the capture contract** that real hardware would
-satisfy, and tells a credible hardware-readiness story.
+The event provides a dataset (drone video + GPS + flight metadata), not a drone — which is precisely the
+**mandatory-only** configuration the official brief guarantees. So this role does not fly hardware at
+the hackathon; it **demonstrates the capture contract** that real hardware would satisfy, proves the
+pipeline runs with the optional sensors absent, and tells a credible hardware-readiness story.
+
 
 **What we demonstrate:**
 
@@ -389,6 +464,13 @@ satisfy, and tells a credible hardware-readiness story.
 4. **Hardware-readiness story.** Show the dual-track platform table, the PSDK/MAVLink integration path,
    the power/thermal budget, and the store-and-forward recorder — i.e. *what real integration looks
    like* — so evaluators see a clear line from the emulated contract to a flown system.
+
+5. **Account for S0's share of the 15 minutes.** Time the emulated capture contract end-to-end — sidecar
+   parse, PTS extraction, trajectory and attitude interpolation, `Keyframe` emission — and report it
+   against the ~1-minute ingest allowance in the ground-tier budget
+   ([Systems & Edge/Compute](6-systems-edge-compute-optimization.md) §2). This is the cheapest stage in the
+   chain and must stay that way: a slow sidecar parser is an easy way to spend two minutes of a
+   fifteen-minute budget before any geometry has run.
 
 This makes the "real hardware" and "single-workstation" demos the **same S0 contract on a different
 topology**, not two different stories.
@@ -410,7 +492,14 @@ topology**, not two different stories.
   boresight) is common with zero GCPs; "metric without GCPs" is honest only with sensor-configuration-
   dependent numbers, and sub-decimetre vertical effectively needs one checkpoint or a precise local
   geoid.
-- **Connectivity at borders/disaster zones.** 4G/5G for NTRIP and streaming may be absent, forcing
+- **Resolution and overlap versus the deadline is an unmeasured trade.** 4K at ≥ 90% overlap is the right
+  capture for the **≤ 1 m** accuracy bar, and it is simultaneously the most expensive input the ground tier
+  can be handed. Whether the full-fidelity chain clears **< 15 minutes** on a 10-minute 4K pass — and if
+  not, whether the honest answer is a leaner keyframe density, 1080p capture, or a ground-tier quality dial
+  — is a measurement, not a preference. First test: the same scene at 4K and at 1080p with **both**
+  accuracy and wall-clock recorded, so the trade is stated in numbers.
+- **Connectivity at borders/disaster zones.**
+ 4G/5G for NTRIP and streaming may be absent, forcing
   PPK-only + a local RTK base over 900 MHz radio and eliminating true real-time cm output there.
 - **Thermal on a sealed UAV.** Onboard 4K encode + Jetson heat in a sealed enclosure is a genuine risk;
   the thermal watchdog → L6 path must be validated on the real airframe, not assumed.

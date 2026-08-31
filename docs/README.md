@@ -5,9 +5,10 @@
 > *One pass. The whole picture — a georeferenced, measurable 3D model of everything the drone flew
 > over, built while it flies.*
 
-**Problem:** NTRO / Smart India Hackathon — *"Single-Pass Drone Video to Accurate 3D Model Generation
-System."* Generate a georeferenced, metrically accurate, textured 3D model from a **single** drone
-pass — no multi-pass grids, no extensive Ground Control Points, near-real-time.
+**Problem:** NTRO / Smart India Hackathon — **PS-17 / SIH26158** · Category: Software · Theme: Drone /
+Robotics — *"Single-Pass Drone Video to Accurate 3D Model Generation System."* Generate a
+georeferenced, metrically accurate, textured 3D model from a **single** drone pass — no multi-pass
+grids, no extensive Ground Control Points, near-real-time.
 
 ---
 
@@ -16,12 +17,14 @@ pass — no multi-pass grids, no extensive Ground Control Points, near-real-time
 Classical drone mapping needs many overlapping passes and hours of Structure-from-Motion + Multi-View
 Stereo — it cannot handle the "one chance to fly" reality of disaster response, reconnaissance and
 rapid mapping. DRISHTI reframes the problem: a single pass gives **weak multi-view geometry** but a
-**strong inertial + GNSS + learned-prior signal**. So DRISHTI fuses **feed-forward learned geometry**
-(VGGT / MASt3R pointmaps + metric monocular depth) with a **tightly-coupled GNSS+IMU+RTK factor graph**
-that supplies metric scale and georeference **without GCPs**, and runs it as a **streaming, two-tier**
-system: a live coarse map on the drone's edge computer during flight, and a full metric textured model
-on the ground tier in minutes. Every stage emits a confidence signal and has a fallback, so the system
-**degrades gracefully and never hard-fails**.
+**strong GNSS + temporal signal (inertial when an IMU is present) plus strong learned priors**. So
+DRISHTI fuses **feed-forward learned geometry** (permissive MapAnything / Pi3 pointmaps + metric
+monocular depth) with a **tightly-coupled visual + GNSS factor graph** (IMU / RTK-PPK / baro folded in
+when present) that supplies metric scale and georeference **without GCPs** — from the mandatory
+**video + GPS + flight metadata** alone, with camera intrinsics self-calibrated by default — and runs
+it as a **streaming, two-tier** system: a live coarse map on the drone's edge computer during flight,
+and a full metric textured model on the ground tier in minutes. Every stage emits a confidence signal
+and has a fallback, so the system **degrades gracefully and never hard-fails**.
 
 ---
 
@@ -76,11 +79,24 @@ on the ground tier in minutes. Every stage emits a confidence signal and has a f
 
 - **Architecture:** three tiers (Edge on Jetson Orin · Ground GPU · optional Cloud), two output paths
   (Live coarse map S0–S5 · Refined metric model S6–S10).
-- **Accuracy (design targets):** RTK/PPK → 3–8 cm horizontal; GPS-only → sub-metre; GSD ≈ 2 cm/px.
+- **Inputs (official contract):** *mandatory* — drone video (1080p/4K), GPS coordinates, flight metadata.
+  *Optional* — IMU, barometric altitude, camera intrinsics, RTK/PPK. Everything here is designed to run on
+  the **mandatory-only** capture, with intrinsics self-calibrated; the optional streams tighten the solve
+  where they exist and are never assumed.
+- **Accuracy (design targets):** official bar **≤ 1 m** absolute — RTK/PPK → 3–8 cm horizontal (meets
+  it comfortably); GPS-only baseline → target sub-metre-to-≤ 1 m, regions > 1 m flagged; GSD ≈ 2 cm/px.
+- **Speed (design target):** near-real-time — live coarse map during flight; final model in
+  **< 15 min for a 10-minute video** end-to-end on the ground tier.
 - **Reliability:** graceful-degradation ladder L0–L6; always emits a best-effort model + uncertainty
   report; store-and-forward so link loss never loses data.
-- **Outputs:** LAS/LAZ point cloud, textured glTF/OBJ/OGC 3D Tiles mesh, 3DGS scene, DSM/DTM +
-  orthomosaic (GeoTIFF), semantic layers, measurements, and an accuracy report.
+- **Outputs:** LAS/LAZ/PLY point cloud, textured OBJ/glTF-GLB/**FBX**/OGC 3D Tiles mesh, 3DGS scene,
+  DSM/DTM + orthomosaic (GeoTIFF), semantic layers, measurements, an accuracy report, and a **web or
+  desktop viewer** — covering the required set **OBJ · PLY · LAS · GeoTIFF · .glb/.gltf · .fbx**.
+- **Graded on (official weights):** reconstruction accuracy **30%** · model completeness **20%** ·
+  processing speed **20%** · innovation **15%** · scalability **10%** · user interface **5%** — quoted
+  verbatim in the [problem statement](_internal/PROBLEM_STATEMENT.md) §1a, which is also where every
+  target above is sourced from.
+
 
 ---
 

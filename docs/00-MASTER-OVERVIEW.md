@@ -6,10 +6,11 @@
 
 **TL;DR**
 
-- **The problem:** produce a *georeferenced, metrically accurate, textured 3D model* from **one** drone pass — no multi-pass grid, no extensive Ground Control Points (GCPs), near-real-time. Classical photogrammetry structurally cannot do this: it needs 70–80% overlap from many passes and hours of offline compute.
+- **The problem** (NTRO · **PS-17 / SIH26158** · Category: Software · Theme: Drone / Robotics): produce a *georeferenced, metrically accurate, textured 3D model* from **one** drone pass — no multi-pass grid, no extensive Ground Control Points (GCPs), near-real-time. Classical photogrammetry structurally cannot do this: it needs 70–80% overlap from many passes and hours of offline compute.
+- **The official bar:** spatial accuracy **≤ 1 m**, processing **< 15 minutes for a 10-minute video**, coverage of the entire visible scene, exports in **OBJ · PLY · LAS · GeoTIFF · .glb/.gltf · .fbx**, and a **web-based or desktop viewer**. Only **video (1080p/4K) + GPS + flight metadata are mandatory inputs**; IMU, barometric altitude, camera intrinsics and RTK/PPK are *optional* — so the baseline **self-calibrates intrinsics** and takes scale from GPS baselines + visual structure.
 - **DRISHTI's reframing:** a single pass gives *weak multi-view geometry* but a *strong inertial + satellite-positioning + learned-prior signal*. So DRISHTI is a **prior-assisted, sensor-fused, streaming reconstruction system**, not a photogrammetry clone.
-- **Four anchors carry the design:** **A1 prior-assisted geometry** (learned depth/pointmaps fill missing views), **A2 metric spine** (a tightly-coupled GNSS+IMU+visual factor graph gives scale and georeference without GCPs), **A3 two output paths** (a near-real-time live map, then a minutes-scale metric model), and **A4 reliability spine** (every stage emits confidence, every stage has a fallback, nothing hard-fails).
-- **Honest envelope:** "real-time" = near-real-time edge preview + minutes-scale ground refinement; "never fails" = graceful degradation + a best-effort model plus an uncertainty report; "metric without GCPs" = sensor-fused scale with configuration-dependent numbers (centimetre with RTK, sub-metre GPS-only). Back-facing and occluded surfaces are *inferred and flagged*, never presented as measured.
+- **Four anchors carry the design:** **A1 prior-assisted geometry** (learned depth/pointmaps fill missing views), **A2 metric spine** (a factor graph over **visual + GNSS** factors — IMU, baro and RTK/PPK fused when present — gives scale and georeference without GCPs, from the mandatory inputs alone), **A3 two output paths** (a near-real-time live map, then a minutes-scale metric model), and **A4 reliability spine** (every stage emits confidence, every stage has a fallback, nothing hard-fails).
+- **Honest envelope:** "real-time" = near-real-time edge preview + minutes-scale ground refinement, inside the official **< 15 min / 10-min-video** budget — never a full 4K textured mesh in hard real-time on the drone; "never fails" = graceful degradation + a best-effort model plus an uncertainty report; "metric without GCPs" = sensor-fused scale with configuration-dependent numbers measured against the **≤ 1 m** bar (centimetre with RTK/PPK, sub-metre-to-≤ 1 m on the GPS-only mandatory baseline, **any region past 1 m flagged**). Back-facing and occluded surfaces are *inferred and flagged*, never presented as measured.
 - **The wedge:** a genuine single linear pass **and** a live map **and** GCP-free georeferenced metric output **and** graceful degradation **and** on-edge, air-gap-ready, made-in-India deployment — an intersection no incumbent occupies.
 
 ---
@@ -43,7 +44,7 @@ The honest takeaway: single-pass reconstruction is not "multi-pass, but faster."
 
 A single pass gives weak geometry but a strong temporal, inertial, satellite-positioning and learned-prior signal. DRISHTI is built on three pillars, which map onto the four consistency anchors (A1–A4) used across every document.
 
-**Pillar 1 — Learned geometry fills the missing views (A1).** Feed-forward multi-view models (VGGT, MASt3R) and metric monocular depth (Metric3D v2, UniDepth, Depth Anything V2) regress dense geometry directly from frames instead of triangulating it. They stay well-conditioned at the tiny baselines and narrow angles that make classical SfM/MVS degenerate — the single-pass weakness — and every learned output carries a per-pixel confidence signal so weakly-constrained regions are down-weighted, never trusted blindly.
+**Pillar 1 — Learned geometry fills the missing views (A1).** Feed-forward multi-view models (**Depth Anything 3, MapAnything, Pi3** — the permissive shipped default; VGGT/MASt3R remain **reference-only**, see §12 risk 4) and metric monocular depth (**Metric3D v2**, Depth Anything 3) regress dense geometry directly from frames instead of triangulating it. They stay well-conditioned at the tiny baselines and narrow angles that make classical SfM/MVS degenerate — the single-pass weakness — and every learned output carries a per-pixel confidence signal so weakly-constrained regions are down-weighted, never trusted blindly.
 
 **Pillar 2 — Sensors supply the metric truth GCPs normally would (A2).** One tightly-coupled factor graph fuses Visual-Inertial Odometry (VIO), Inertial Measurement Unit (IMU) pre-integration, Global Navigation Satellite System (GNSS) factors, optional Real-Time / Post-Processed Kinematic (RTK/PPK) corrections and barometer into a metric, gravity-aligned, georeferenced camera trajectory. Scale comes from IMU and GNSS baselines (removing monocular scale ambiguity); georeference comes from GNSS(+RTK/PPK). The continuous flight track acts as thousands of soft control points, so no Ground Control Point network is required.
 
@@ -100,7 +101,7 @@ flowchart LR
 | **Stages** | S0–S5 | S6–S10 | tiling / serving |
 | **Job** | Live coarse map + compact keyframe package | Metric textured model + reports | Scale-out, 3D Tiles, digital twin |
 | **Latency** | Near-real-time (~1–2 s/keyframe) | Minutes per minute of video / per km² | Batch |
-| **Key tools** | Jetson Orin, TensorRT, nvblox, VIO, GStreamer/NVDEC | GTSAM BA, VGGT/MASt3R, InstantSplat/2DGS, GDAL/PDAL | py3dtiles, CesiumJS, Potree |
+| **Key tools** | Jetson Orin, TensorRT, nvblox, VO/VIO, GStreamer/NVDEC | GTSAM BA, GLOMAP/COLMAP, Depth Anything 3 / MapAnything / Pi3, gsplat/2DGS, GDAL/PDAL | py3dtiles, CesiumJS, Potree |
 | **Air-gap** | Required for defense use | Rugged laptop in the field | Omitted |
 
 The Edge/Ground split is a deployment convenience, not a hard boundary: for the hackathon everything can run on one workstation with the split emulated. Full stage-by-stage detail lives in [How It Works](02-HOW-IT-WORKS.md); the authoritative interfaces are in the [Canonical Architecture Spec](_internal/CANONICAL-ARCHITECTURE-SPEC.md).
@@ -114,7 +115,7 @@ Everything below is produced from **one flight** and exported in open, interoper
 | # | Deliverable | Primary format(s) | Purpose / use |
 |---|-------------|-------------------|----------------|
 | 1 | **Georeferenced dense point cloud** | LAS/LAZ, PLY | Measurement, GIS ingest, ground truth for downstream products |
-| 2 | **Textured 3D mesh (multi-LOD)** | OBJ+MTL, glTF/GLB, OGC **3D Tiles**, OSGB | Visualization, inspection, digital twin |
+| 2 | **Textured 3D mesh (multi-LOD)** | OBJ+MTL, glTF/GLB, **FBX**, OGC **3D Tiles**, OSGB | Visualization, inspection, digital twin, CAD/DCC interchange |
 | 3 | **3D Gaussian-Splat scene** | `.ply` / `.splat` / `.ksplat` | Photorealistic free-viewpoint situational awareness |
 | 4 | **Digital Surface Model (DSM) + Digital Terrain Model (DTM)** | GeoTIFF (float32, COG) | Elevation, volumetrics, terrain & slope analysis |
 | 5 | **True orthomosaic** | GeoTIFF (COG) | Top-down basemap, planning, change detection |
@@ -130,17 +131,28 @@ LOD = Level of Detail; COG = Cloud-Optimized GeoTIFF; GSD = Ground Sampling Dist
 
 ## 5. How it is evaluated
 
-Targets assume a nadir/oblique single pass at typical Above Ground Level (AGL). Two accuracy regimes are reported because RTK/PPK is an *optional* input: **(A) RTK/PPK available** and **(B) GPS-only**. RMSE = Root-Mean-Square Error; CI = confidence interval; C2C/C2M = cloud-to-cloud / cloud-to-mesh distance.
+**The official weighted rubric is what scores us** — we built for the heaviest criteria first:
+
+| Criteria | Weight | Where DRISHTI earns it |
+|----------|--------|------------------------|
+| **Reconstruction accuracy** | **30%** | **A2** metric spine — GNSS + visual scale, self-calibrated intrinsics, bundle-adjusted against the ≤ 1 m bar |
+| **Model completeness** | **20%** | **A1** prior-assisted geometry + the coverage / occlusion report (§4, deliverable 8) |
+| **Processing speed** | **20%** | **A3** two paths — live edge preview, ground refine inside < 15 min / 10-min video, TensorRT |
+| **Innovation** | **15%** | Prior-assisted single-pass orchestration (§6) |
+| **Scalability** | **10%** | Three tiers, swappable permissive models, cloud tiling |
+| **User interface** | **5%** | Web/desktop viewer with measurement tools + per-region confidence overlay |
+
+Our own instrumentation below elaborates those six. Targets assume a nadir/oblique single pass at typical Above Ground Level (AGL). Two accuracy regimes are reported because RTK/PPK is an *optional* input: **(A) RTK/PPK available** and **(B) GPS-only** — B being the mandatory-input baseline. RMSE = Root-Mean-Square Error; CI = confidence interval; C2C/C2M = cloud-to-cloud / cloud-to-mesh distance.
 
 | # | Criterion | Metric / how measured | Target (A: RTK/PPK · B: GPS-only) |
 |---|-----------|------------------------|------------------------------------|
-| 1 | **Absolute geometric accuracy** | H & V RMSE vs independent checkpoints/survey | A: ≤ 2–5 cm + 1×GSD · B: ~0.5–2 m (report with CI) |
+| 1 | **Absolute geometric accuracy** | H & V RMSE vs independent checkpoints/survey | **Official bar ≤ 1 m.** A: ≤ 2–5 cm + 1×GSD · B: target ≤ 1 m (0.5–2 m envelope by GPS quality; report with CI, **flag > 1 m**) |
 | 2 | **Relative accuracy** | Known-distance / scale-bar error; local RMSE | A: < 1% of distance · B: report measured value |
 | 3 | **Ground Sampling Distance (GSD)** | cm/pixel from AGL & sensor geometry | ~1.5–3 cm/px at typical mapping altitude |
 | 4 | **Completeness / coverage** | % target surface above confidence threshold; occlusion-flagged area | Maximize; **explicitly report** unseen / low-confidence regions |
 | 5 | **Reconstruction fidelity** | Point density (pts/m²), mesh detail, texture sharpness, hole ratio | Quantitative + qualitative panel |
 | 6 | **Quality vs reference** | C2C, C2M, Chamfer vs COLMAP/Metashape or LiDAR | Minimize distance; report percentiles |
-| 7 | **Processing latency** | (a) live-preview latency per keyframe; (b) time-to-final-model per minute of video / km² | a: near-real-time (≈1–2 s/keyframe, edge) · b: minutes (ground GPU) |
+| 7 | **Processing latency** | (a) live-preview latency per keyframe; (b) time-to-final-model per minute of video / km² | **Official bar: < 15 min for a 10-min video** (end-to-end, ground). a: near-real-time (≈1–2 s/keyframe, edge) · b: within the < 15 min / 10-min budget |
 | 8 | **Robustness** | Degradation curve under injected blur, illumination change, GPS noise, dynamic-object density | Graceful, monotonic; **no hard failure** |
 | 9 | **Dynamic-object rejection** | Precision/recall of masked movers; residual "ghost" density | High recall; near-zero ghosting |
 | 10 | **Georeferencing correctness** | Absolute position error of known features; CRS/datum/geoid correctness | Within accuracy budget; correct EPSG + geoid model |
@@ -230,7 +242,7 @@ No existing product solves the stated problem end-to-end. The market splits into
 
 ## 10. Roadmap
 
-**Hackathon MVP (buildable at the event, on the provided dataset).** Video + GPS + metadata → keyframe QA → poses (VGGT/MASt3R or COLMAP) → metric monocular depth scale-aligned to GPS → fused cloud/TSDF (Open3D) → few-shot 3DGS (InstantSplat) → mesh (2DGS/Poisson) → georeference to UTM → export LAS/glTF + DSM + orthomosaic + an accuracy report vs a COLMAP/Metashape reference (C2C/C2M) + web viewer. Dynamic-object masking (YOLO/SAM2) shown; graceful degradation demonstrated by injecting GPS noise and blur. **Live stretch:** stream a clip through an edge-emulated path with a live nvblox coarse preview.
+**Hackathon MVP (buildable at the event, on the provided dataset).** Video + GPS + metadata (the mandatory inputs only, intrinsics **self-calibrated**) → keyframe QA → poses (GLOMAP/COLMAP, or permissive feed-forward: Depth Anything 3 / MapAnything / Pi3) → metric monocular depth scale-aligned to GPS → fused cloud/TSDF (Open3D) → few-shot 3DGS (gsplat) → mesh (2DGS/Poisson) → georeference to UTM → export the **required set (OBJ · PLY · LAS · GeoTIFF · glTF/GLB · FBX)** + DSM + orthomosaic + an accuracy report vs a COLMAP/Metashape reference (C2C/C2M) + web/desktop viewer, inside the **< 15 min / 10-min-video** budget. Dynamic-object masking (YOLO/SAM2) shown; graceful degradation demonstrated by injecting GPS noise and blur. **Live stretch:** stream a clip through an edge-emulated path with a live nvblox coarse preview.
 
 **Field pilot.** On-UAV Jetson deployment (Payload SDK / MAVLink), live RTK via NTRIP or PPK post-processing, ROS 2 pipeline with the reliability ladder wired to health monitors, real capture SOP (oblique gimbal, slow steady pass, optional lateral weave), validation against survey checkpoints and a reference LiDAR/photogrammetry scan.
 
@@ -258,8 +270,9 @@ Six roles own the pipeline end to end; each has a dedicated document.
 | 1 | **Aerial domain gap** — learned depth/geometry models are trained mostly on ground-level/indoor data; nadir/oblique aerial views are out-of-distribution, so metric accuracy at altitude is unproven. | Fine-tune / calibrate on aerial data (UseGeo, ISPRS, synthetic renders); cross-check learned depth against multi-view agreement and IMU/GNSS scale; validate against checkpoints before claiming numbers. |
 | 2 | **Hallucinated geometry** — feed-forward models and occlusion completion produce plausible-but-wrong surfaces in unseen regions, dangerous for measurement. | End-to-end confidence gating; completed/occluded regions flagged low-confidence and excluded from measurement by default; separate "measured" vs "inferred" layers. |
 | 3 | **Metric accuracy without GCPs, especially vertical** — residual lever-arm/geoid/boresight bias (~10–30 cm V) with zero control. | Tight time-sync (<~3 ms) and lever-arm calibration; correct geoid (EGM2008 or Indian national grid); recommend one optional checkpoint; report vertical honestly with CI. |
-| 4 | **Licensing for defense** — several strongest checkpoints (VGGT commercial excludes military use; MASt3R, DA-V2 Base/Large non-commercial; Ultralytics YOLO AGPL-3.0). | Assemble the deployable stack from permissive components (Metric3D BSD, DA-V2 Small Apache, RoMa MIT, GTSAM BSD, RT-DETR/RTMDet Apache) or retrained/licensed equivalents; treat licensing as an integration constraint, tracked in the Technology Stack doc. |
-| 5 | **Edge compute / thermal limits** — heavy transformers (VGGT ~1.2B) exceed Orin budgets; thermal throttling silently cuts clocks. | Edge/ground split (light nets on drone via TensorRT INT8, heavy backbones on ground); nvpmodel power caps + thermal watchdog wired into the degradation ladder; store-and-forward decouples the accurate model from live compute pressure. |
+| 4 | **Licensing for defense** — military reconnaissance is explicitly in scope, and the strongest checkpoints exclude it (VGGT's commercial checkpoint excludes military use; DUSt3R/MASt3R and UniDepth V2 are CC BY-NC; Ultralytics YOLO is AGPL-3.0). Those are **reference-only**, never shipped. | Ship a permissive-only stack — **Depth Anything 3, MapAnything, Pi3, Metric3D v2, gsplat, GLOMAP/COLMAP, RT-DETR, SAM2** (CC-BY / Apache / BSD). Restricted models stay research/benchmark references; licensing is tracked as an integration constraint in the Technology Stack doc. |
+
+| 5 | **Edge compute / thermal limits** — the heavy pointmap transformers (the ~1B-parameter class) exceed Orin budgets; thermal throttling silently cuts clocks. | Edge/ground split (light nets on drone via TensorRT INT8, heavy backbones on ground); nvpmodel power caps + thermal watchdog wired into the degradation ladder; store-and-forward decouples the accurate model from live compute pressure. |
 | 6 | **GNSS jamming / multipath** in border and urban-canyon targets corrupts the signal we depend on. | Robust/switchable GNSS factors (Huber/DCS) + outlier rejection; VIO+IMU dead-reckoning fallback (L2); raw-GNSS fusion contributes with <4 satellites; re-anchor on re-acquire. |
 
 ---
@@ -306,7 +319,7 @@ Read this document first, then follow the path for your role. Links are relative
 - **Aerial-domain metric accuracy is unproven until measured.** All accuracy-budget figures in §7 are *design targets*; they must be validated on the event dataset and against independent checkpoints before being stated as results. Confidence calibration for learned models is likely optimistic on out-of-distribution aerial content and needs empirical recalibration.
 - **Vertical accuracy without a checkpoint** carries a systematic ~10–30 cm bias even with RTK/PPK. Whether the submission budgets for one optional checkpoint (breaking a strict "zero ground control" reading) is a scope decision for evaluators to weigh.
 - **Licensing vs the defense context** is the single biggest productization risk: the highest-accuracy checkpoints are non-commercial or exclude military use. The permissive-component path (see §12, risk 4) may trade some accuracy for deployability; this trade must be quantified.
-- **Scale drift over long corridors** — a non-revisiting single pass offers no loop closures, so drift is bounded only by GNSS/IMU fusion. Corridor length limits and chunking/stitching (VGGT-Long-style) need validation.
+- **Scale drift over long corridors** — a non-revisiting single pass offers no loop closures, so drift is bounded only by GNSS/IMU fusion. Corridor length limits and chunking/stitching (overlapping windows with state carry) need validation, and with the IMU being an *optional* input the GNSS-only case is the one that must hold.
 - **Docs 03 and 05 are referenced but not yet on disk** in this working tree; the links above assume the canonical filenames from the [README](README.md) and will resolve once those documents are authored. No conflict with the architecture spec was found while writing this overview.
 
 ## Further reading

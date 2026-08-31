@@ -280,6 +280,9 @@ td .lv{font-family:"IBM Plex Mono"; color:var(--accent); font-weight:600}
 .close .k{font-family:"IBM Plex Mono"; font-size:.7rem; letter-spacing:.22em; text-transform:uppercase; color:var(--vp-amber); position:relative}
 .close h2{font-size:clamp(1.7rem,4vw,2.8rem); color:#fff; margin:1rem auto; max-width:20ch; position:relative}
 .close p{color:var(--vp-ink); max-width:56ch; margin:0 auto; position:relative; opacity:.85}
+.apps{display:flex; flex-wrap:wrap; gap:.5rem; justify-content:center; max-width:62rem; margin:0 auto 2.4rem}
+.apps span{font-family:"IBM Plex Mono"; font-size:.72rem; letter-spacing:.03em; color:var(--ink-soft); background:var(--surface); border:1px solid var(--line); border-radius:100px; padding:.42rem .82rem; box-shadow:var(--shadow)}
+.apps .ah{color:var(--cyan); letter-spacing:.14em; text-transform:uppercase; font-size:.66rem; border:none; background:none; box-shadow:none; padding:.42rem .3rem; align-self:center}
 
 footer{padding:3rem 0 4rem; border-top:1px solid var(--line-soft); margin-top:1rem}
 .foot{display:flex; justify-content:space-between; gap:1.5rem; flex-wrap:wrap; font-size:.82rem; color:var(--ink-faint)}
@@ -308,7 +311,7 @@ footer{padding:3rem 0 4rem; border-top:1px solid var(--line-soft); margin-top:1r
       <span>DRISHTI<small>Single-pass · metric 3D</small></span>
     </div>
     <div class="nav-right">
-      <span class="chip-ntro">NTRO · SIH 2026</span>
+      <span class="chip-ntro">NTRO · PS-17 · SIH26158</span>
       <button class="tgl" id="themeBtn" aria-label="Toggle colour theme" title="Toggle theme">◐</button>
     </div>
   </div>
@@ -319,7 +322,7 @@ footer{padding:3rem 0 4rem; border-top:1px solid var(--line-soft); margin-top:1r
   <section class="hero">
     <div class="wrap hero-grid">
       <div>
-        <span class="eyebrow">NTRO Problem Statement · Software · Robotics &amp; Drones</span>
+        <span class="eyebrow">NTRO · PS-17 (SIH26158) · Software · Drone / Robotics</span>
         <h1>One pass.<br>One chance.<br>A model you can <em>measure</em>.</h1>
         <p class="lede">Conventional drone mapping flies a dense grid, lands, and grinds hours of photogrammetry offline. The mission we are built for gives a <strong>single flight line</strong> — so DRISHTI turns one pass into a metric, textured, georeferenced 3D model: a live preview in the air, and the refined model on the ground in minutes.</p>
       </div>
@@ -360,9 +363,9 @@ footer{padding:3rem 0 4rem; border-top:1px solid var(--line-soft); margin-top:1r
     <div class="wrap">
       <div class="stats reveal">
         <div class="stat"><div class="n">1<span class="u">×</span></div><div class="l">flight line — no lawnmower grid, no re-fly</div></div>
-        <div class="stat"><div class="n">0</div><div class="l">ground control points — metric from fused GNSS + IMU</div></div>
-        <div class="stat"><div class="n">cm→<span class="u">m</span></div><div class="l">accuracy band, sensor-dependent · design target</div></div>
-        <div class="stat"><div class="n">S0→<span class="u">10</span></div><div class="l">edge preview to ground-refined deliverables</div></div>
+        <div class="stat"><div class="n">≤ 1<span class="u">m</span></div><div class="l">spatial-accuracy target · regions beyond it flagged</div></div>
+        <div class="stat"><div class="n">&lt; 15<span class="u">min</span></div><div class="l">final model for a 10-min video · design target</div></div>
+        <div class="stat"><div class="n">0</div><div class="l">ground control points — metric from GPS + visual scale</div></div>
       </div>
     </div>
   </section>
@@ -389,11 +392,11 @@ footer{padding:3rem 0 4rem; border-top:1px solid var(--line-soft); margin-top:1r
       <div class="block-head reveal">
         <span class="eyebrow">The reframe</span>
         <h2 class="big">A single pass is weak on geometry — but rich in signal.</h2>
-        <p class="lede">Short baselines and limited angles starve classical triangulation. But one pass still carries a strong temporal, inertial and satellite-navigation signal, and today's learned priors are strong. DRISHTI is a <strong>prior-assisted, sensor-fused, streaming</strong> reconstruction system — not a classical photogrammetry clone. Three ideas carry the whole design.</p>
+        <p class="lede">Short baselines and limited angles starve classical triangulation. But one pass still carries a strong satellite-navigation and temporal signal — and inertial too, when an IMU is aboard — while today's learned priors are strong. DRISHTI is a <strong>prior-assisted, sensor-fused, streaming</strong> reconstruction system — not a classical photogrammetry clone. Three ideas carry the whole design.</p>
       </div>
       <div class="cards cols-3">
         <div class="card idea reveal"><span class="tag">Idea 01</span><h3>Learned geometry beats missing views</h3><p>Feed-forward multi-view models and metric monocular depth supply dense geometry exactly where short baselines break triangulation — each output carrying a per-pixel confidence.</p></div>
-        <div class="card idea reveal"><span class="tag">Idea 02</span><h3>Sensors supply the metric truth</h3><p>A tightly-coupled GNSS(+RTK/PPK)+IMU+visual factor graph fixes scale and georeference — the job ground control points normally do, done from the aircraft.</p></div>
+        <div class="card idea reveal"><span class="tag">Idea 02</span><h3>Sensors supply the metric truth</h3><p>A tightly-coupled visual + GNSS factor graph — with IMU, RTK/PPK and baro folded in whenever they're present — fixes scale and georeference from the aircraft, the job ground control points normally do. Only video + GPS are required.</p></div>
         <div class="card idea reveal"><span class="tag">Idea 03</span><h3>Everything streams, everything degrades</h3><p>A live coarse map on the edge in flight; a refined metric model on the ground in minutes. Every stage emits confidence and has a fallback.</p></div>
       </div>
     </div>
@@ -408,7 +411,7 @@ footer{padding:3rem 0 4rem; border-top:1px solid var(--line-soft); margin-top:1r
       </div>
       <div class="cards cols-4">
         <div class="card anchor reveal"><span class="tag">A1</span><h3>Prior-assisted geometry</h3><p>Fuse classical multi-view constraints with learned depth &amp; pointmap priors — never triangulation alone.</p></div>
-        <div class="card anchor reveal"><span class="tag">A2</span><h3>Metric spine</h3><p>One factor graph fuses VIO + GNSS + RTK/PPK + IMU + baro into a metric, georeferenced trajectory — without GCPs.</p></div>
+        <div class="card anchor reveal"><span class="tag">A2</span><h3>Metric spine</h3><p>A visual + GNSS factor graph — IMU, RTK/PPK and baro added when present — yields a metric, georeferenced trajectory without GCPs. The baseline needs only video + GPS.</p></div>
         <div class="card anchor reveal"><span class="tag">A3</span><h3>Two output paths</h3><p>A Live path (edge, near-real-time) and a Refine path (ground, minutes). The live map survives even if refine is interrupted.</p></div>
         <div class="card anchor reveal"><span class="tag">A4</span><h3>Reliability spine</h3><p>Every stage emits confidence and has a fallback; output is always a best-effort model <em>plus</em> an uncertainty report.</p></div>
       </div>
@@ -430,9 +433,9 @@ footer{padding:3rem 0 4rem; border-top:1px solid var(--line-soft); margin-top:1r
       </div>
 
       <div class="rail reveal" role="list" aria-label="Pipeline stages S0 to S10">
-        <div class="stage live" role="listitem"><span class="tier">Edge</span><div class="sid">S0</div><div class="sn">Capture &amp; Sync</div><div class="sd">Time-align every frame to IMU, GNSS, baro on one clock.</div></div>
+        <div class="stage live" role="listitem"><span class="tier">Edge</span><div class="sid">S0</div><div class="sn">Capture &amp; Sync</div><div class="sd">Time-align frames to GPS + metadata on one clock; IMU/baro when present.</div></div>
         <div class="stage live" role="listitem"><span class="tier">Edge</span><div class="sid">S1</div><div class="sn">Ingest &amp; Frame QA</div><div class="sd">Blur/exposure gating; keyframe selection; optional deblur.</div></div>
-        <div class="stage live" role="listitem"><span class="tier">Edge</span><div class="sid">S2</div><div class="sn">Odometry &amp; Localization</div><div class="sd">VIO + tightly-coupled factor graph — the metric spine.</div></div>
+        <div class="stage live" role="listitem"><span class="tier">Edge</span><div class="sid">S2</div><div class="sn">Odometry &amp; Localization</div><div class="sd">Visual odometry + GNSS factor graph (VIO when IMU present) — the metric spine.</div></div>
         <div class="stage live" role="listitem"><span class="tier">Edge</span><div class="sid">S3</div><div class="sn">Perception &amp; Masking</div><div class="sd">Remove moving objects; label terrain, roads, buildings.</div></div>
         <div class="stage live" role="listitem"><span class="tier">Edge</span><div class="sid">S4</div><div class="sn">Depth &amp; Geometry</div><div class="sd">Metric depth + feed-forward multi-view, scale-aligned.</div></div>
         <div class="stage live" role="listitem"><span class="tier">Edge</span><div class="sid">S5</div><div class="sn">Live Fusion</div><div class="sd">Confidence-weighted TSDF → live coarse map (nvblox).</div></div>
@@ -440,7 +443,7 @@ footer{padding:3rem 0 4rem; border-top:1px solid var(--line-soft); margin-top:1r
         <div class="stage refine" role="listitem"><span class="tier">Ground</span><div class="sid">S7</div><div class="sn">Dense Recon &amp; 3DGS</div><div class="sd">Few-shot Gaussian Splatting; occlusion completion, flagged.</div></div>
         <div class="stage refine" role="listitem"><span class="tier">Ground</span><div class="sid">S8</div><div class="sn">Meshing &amp; Texturing</div><div class="sd">Surface extraction → multi-LOD textured mesh.</div></div>
         <div class="stage refine" role="listitem"><span class="tier">Ground</span><div class="sid">S9</div><div class="sn">Georeferencing &amp; Semantics</div><div class="sd">Project to UTM + geoid; DSM/DTM; true orthomosaic.</div></div>
-        <div class="stage refine" role="listitem"><span class="tier">Ground</span><div class="sid">S10</div><div class="sn">Export &amp; Serve</div><div class="sd">LAS/glTF/3D Tiles/GeoTIFF + accuracy &amp; confidence report.</div></div>
+        <div class="stage refine" role="listitem"><span class="tier">Ground</span><div class="sid">S10</div><div class="sn">Export &amp; Serve</div><div class="sd">OBJ · PLY · LAS · GeoTIFF · glTF/GLB · FBX + accuracy report; web/desktop viewer.</div></div>
       </div>
     </div>
   </section>
@@ -451,15 +454,15 @@ footer{padding:3rem 0 4rem; border-top:1px solid var(--line-soft); margin-top:1r
       <div class="block-head reveal">
         <span class="eyebrow sect-kicker">Anchor A2 · in detail</span>
         <h2 class="big">Metric, without ground control points.</h2>
-        <p class="lede">Scale comes from the IMU (acceleration against gravity) and GNSS baselines — this is what removes monocular scale ambiguity with no control points. Georeference comes from GNSS(+RTK/PPK), aligning the local solution to WGS84 and projecting to UTM. Robust kernels reject satellite-navigation outliers, and covariance flows all the way into the accuracy report.</p>
+        <p class="lede">Only <strong>video + GPS + flight metadata</strong> are mandatory. Scale comes from GNSS baselines and visual structure — removing monocular scale ambiguity with no control points — and camera intrinsics are self-calibrated when not supplied. An IMU (acceleration against gravity), RTK/PPK and baro are <strong>optional enhancers</strong> that tighten the solution when present. Georeference comes from GNSS(+RTK/PPK), aligning the local solution to WGS84 and projecting to UTM; robust kernels reject satellite-navigation outliers, and covariance flows all the way into the accuracy report.</p>
       </div>
       <div class="spine reveal">
         <div class="ins">
-          <div class="pill"><span class="k">IMU</span> pre-integration</div>
-          <div class="pill"><span class="k">VIS</span> visual keyframes</div>
-          <div class="pill"><span class="k">GNSS</span> satellite factors</div>
+          <div class="pill"><span class="k">VIS</span> visual keyframes · required</div>
+          <div class="pill"><span class="k">GNSS</span> satellite factors · required</div>
+          <div class="pill"><span class="k">IMU</span> pre-integration · optional</div>
           <div class="pill"><span class="k">RTK</span> RTK/PPK · optional</div>
-          <div class="pill"><span class="k">BARO</span> barometer</div>
+          <div class="pill"><span class="k">BARO</span> barometer · optional</div>
         </div>
         <div class="arrow">→</div>
         <div class="node-fg"><div class="lbl">Factor graph</div><div class="sub">GTSAM · iSAM2</div></div>
@@ -474,19 +477,21 @@ footer{padding:3rem 0 4rem; border-top:1px solid var(--line-soft); margin-top:1r
     <div class="wrap">
       <div class="block-head reveal">
         <span class="eyebrow">Accuracy, stated honestly</span>
-        <h2 class="big">One number would be a lie. Here are three regimes.</h2>
-        <p class="lede">Accuracy is sensor-configuration-dependent, and vertical is the weaker axis. These are engineering <strong>design targets to be measured</strong> on the event dataset — not certified results.</p>
+        <h2 class="big">The bar is ≤ 1 m. One number would still be a lie — here are the regimes.</h2>
+        <p class="lede">The official target is <strong>≤ 1 m absolute spatial accuracy</strong>. Accuracy is sensor-configuration-dependent and vertical is the weaker axis, so we report by regime — and <strong>flag any region that would exceed 1 m</strong> rather than hide it behind an average. These are engineering <strong>design targets to be measured</strong> on the event dataset — not certified results.</p>
       </div>
       <div class="tbl-wrap reveal">
         <table class="tnum">
-          <thead><tr><th>Configuration</th><th>Absolute horizontal</th><th>Absolute vertical</th><th>Relative / local</th><th>GSD ≈80 m AGL</th></tr></thead>
+          <thead><tr><th>Configuration</th><th>Absolute horizontal</th><th>Absolute vertical</th><th>vs ≤ 1 m bar</th><th>GSD ≈80 m AGL</th></tr></thead>
           <tbody>
-            <tr><td><span class="regime">RTK / PPK</span> <span class="lv">L0</span></td><td>3–8 cm</td><td>5–12 cm</td><td>&lt; 1% of distance</td><td>~2 cm/px</td></tr>
-            <tr><td><span class="regime">GNSS-only</span> <span class="lv">L1</span></td><td>0.5–2 m</td><td>0.8–2.5 m</td><td>dm-level local</td><td>~2 cm/px</td></tr>
-            <tr><td><span class="regime">GPS-denied</span> <span class="lv">L2</span></td><td>georef on re-acquire</td><td>—</td><td>dm-level local</td><td>~2 cm/px</td></tr>
+            <tr><td><span class="regime">RTK / PPK</span> <span class="lv">L0</span></td><td>3–8 cm</td><td>5–12 cm</td><td>✅ comfortably</td><td>~2 cm/px</td></tr>
+            <tr><td><span class="regime">GNSS + IMU</span> <span class="lv">L1</span></td><td>0.3–1 m</td><td>0.5–1.5 m</td><td>✅ H · ⚠ flag V &gt; 1 m</td><td>~2 cm/px</td></tr>
+            <tr><td><span class="regime">GPS-only baseline</span> <span class="lv">mandatory inputs</span></td><td>0.5–2 m</td><td>0.8–2.5 m</td><td>target ≤ 1 m · flag &gt; 1 m</td><td>~2 cm/px</td></tr>
+            <tr><td><span class="regime">GPS-denied</span> <span class="lv">L2</span></td><td>georef on re-acquire</td><td>—</td><td>relative-only until re-acquire</td><td>~2 cm/px</td></tr>
           </tbody>
         </table>
       </div>
+      <p class="fine reveal">The baseline's upper envelope (2–2.5 m) is the degraded-GPS worst case; with nominal GPS, self-calibrated intrinsics and bundle adjustment the design targets sub-metre-to-≤ 1 m. We report the measured value with confidence and flag any region past the 1 m bar — never a blanket "≤ 1 m".</p>
     </div>
   </section>
 
@@ -523,10 +528,11 @@ footer{padding:3rem 0 4rem; border-top:1px solid var(--line-soft); margin-top:1r
         <div class="env-col env-do">
           <h3>What DRISHTI claims</h3>
           <ul>
-            <li><b>Near-real-time live preview</b> on the edge, plus a refined model on the ground in minutes.</li>
-            <li><b>Metric &amp; georeferenced from fused sensors</b> — centimetre-class with RTK/PPK, sub-metre GPS-only.</li>
+            <li><b>Near-real-time live preview</b> on the edge, plus a refined model on the ground — <b>under 15 minutes for a 10-minute video</b> (design target).</li>
+            <li><b>Runs on the mandatory inputs alone</b> — video + GPS + flight metadata — with intrinsics self-calibrated; IMU, RTK/PPK and baro only sharpen it.</li>
+            <li><b>Metric &amp; georeferenced</b> to a <b>≤ 1 m</b> target — centimetre-class with RTK/PPK, sub-metre-to-≤ 1 m GPS-only, flagged wherever it would exceed it.</li>
             <li><b>Graceful degradation</b> with no single point of failure, and an explicit uncertainty &amp; coverage report.</li>
-            <li><b>Standard deliverables</b> — textured mesh, point cloud, DSM/DTM, orthomosaic, 3D Tiles.</li>
+            <li><b>Standard deliverables</b> — OBJ · PLY · LAS · GeoTIFF · glTF/GLB · FBX, DSM/DTM &amp; orthomosaic, in a web or desktop viewer.</li>
           </ul>
         </div>
         <div class="env-col env-dont">
@@ -542,8 +548,33 @@ footer{padding:3rem 0 4rem; border-top:1px solid var(--line-soft); margin-top:1r
     </div>
   </section>
 
-  <!-- COMPETITIVE -->
+  <!-- EVALUATION SCORECARD -->
   <section class="alt">
+    <div class="wrap">
+      <div class="block-head reveal">
+        <span class="eyebrow sect-kicker">The official scorecard</span>
+        <h2 class="big">Six weighted criteria. We built for the heaviest first.</h2>
+        <p class="lede">NTRO scores this problem on a fixed rubric. We didn't spread effort evenly — <strong>accuracy, completeness and speed are 70% of the score</strong>, and they map one-to-one onto the metric spine, the coverage report and the two-path pipeline. Nothing here is bolted on to chase points; each criterion is won by a part of the architecture that already had to exist.</p>
+      </div>
+      <div class="tbl-wrap reveal">
+        <table class="tnum">
+          <thead><tr><th>Criterion</th><th>Weight</th><th>How DRISHTI wins it</th></tr></thead>
+          <tbody>
+            <tr><td><b>Reconstruction accuracy</b></td><td>30%</td><td>Anchor <b>A2</b> metric spine — GNSS baselines + visual scale, self-calibrated intrinsics, bundle-adjusted to the ≤ 1 m bar; RTK/PPK + IMU tighten to cm when present, and every over-bar region is flagged.</td></tr>
+            <tr><td><b>Model completeness</b></td><td>20%</td><td>Prior-assisted geometry fills the gaps a single pass leaves; the coverage report names every unseen / low-confidence region instead of hiding it in an average.</td></tr>
+            <tr><td><b>Processing speed</b></td><td>20%</td><td>Anchor <b>A3</b> two paths — a live edge preview <em>during</em> flight, and a ground refine that targets <b>&lt; 15 min for a 10-min video</b>, TensorRT-accelerated.</td></tr>
+            <tr><td><b>Innovation</b></td><td>15%</td><td>Prior-assisted single-pass orchestration — the IP is the pipeline that makes one pass metric and georeferenced, not any single off-the-shelf model.</td></tr>
+            <tr><td><b>Scalability</b></td><td>10%</td><td>Three tiers (edge / ground / cloud), swappable permissively-licensed models, and cloud tiling for scenes larger than one machine.</td></tr>
+            <tr><td><b>User interface</b></td><td>5%</td><td>A web &amp; desktop viewer with in-scene measurement tools and a per-region confidence overlay — the accuracy story made visible.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="fine reveal">Weights sum to 100%. We optimise for the heavy three without neglecting the light three — the viewer and the scalability story are real, not placeholders.</p>
+    </div>
+  </section>
+
+  <!-- COMPETITIVE -->
+  <section>
     <div class="wrap">
       <div class="block-head reveal">
         <span class="eyebrow sect-kicker">Where we fit</span>
@@ -564,7 +595,7 @@ footer{padding:3rem 0 4rem; border-top:1px solid var(--line-soft); margin-top:1r
   </section>
 
   <!-- SOVEREIGN / SHIP -->
-  <section>
+  <section class="alt">
     <div class="wrap">
       <div class="block-head reveal">
         <span class="eyebrow">Built to ship — and to stay sovereign</span>
@@ -581,7 +612,7 @@ footer{padding:3rem 0 4rem; border-top:1px solid var(--line-soft); margin-top:1r
   </section>
 
   <!-- BRIEFING PACK -->
-  <section class="alt">
+  <section>
     <div class="wrap">
       <div class="block-head reveal">
         <span class="eyebrow sect-kicker">The briefing pack</span>
@@ -608,8 +639,19 @@ footer{padding:3rem 0 4rem; border-top:1px solid var(--line-soft); margin-top:1r
   </section>
 
   <!-- CLOSE -->
-  <section>
+  <section class="alt">
     <div class="wrap">
+      <div class="apps reveal">
+        <span class="ah">Where one pass pays off</span>
+        <span>Border &amp; strategic mapping</span>
+        <span>Disaster damage assessment</span>
+        <span>Urban planning &amp; smart cities</span>
+        <span>Infrastructure inspection</span>
+        <span>Construction progress</span>
+        <span>Archaeological documentation</span>
+        <span>Digital-twin generation</span>
+        <span>Military recon &amp; mission planning</span>
+      </div>
       <div class="close reveal">
         <span class="k">DRISHTI — Drone-based Real-time Imaging for Single-pass High-fidelity Terrain Intelligence</span>
         <h2>One pass. A model you can measure — and a map of how much to trust it.</h2>

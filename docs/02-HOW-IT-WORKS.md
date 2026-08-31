@@ -13,17 +13,24 @@ pitch, and the DRISHTI build team who need one shared picture of the pipeline.
 - It has **two output paths** (anchor **A3**): a **Live path** (S0–S5, Edge Tier) streaming a
   near-real-time coarse map for situational awareness, and a **Refine path** (S6–S10, Ground Tier)
   producing the minutes-scale metric, textured, georeferenced model. **Store-and-forward** links them.
-- **A1 — prior-assisted geometry:** feed-forward multi-view models (VGGT, MASt3R) plus metric
-  monocular depth (Metric3D v2, UniDepth V2, Depth Anything V2) supply dense geometry where a single
-  pass's short baselines make triangulation degenerate.
-- **A2 — metric spine:** one tightly-coupled factor graph fuses Visual-Inertial Odometry (VIO) + GNSS
-  (+ RTK/PPK) + Inertial Measurement Unit (IMU) pre-integration + barometer to fix **scale and
-  georeference without Ground Control Points (GCPs)**, with honest, sensor-configuration-dependent
-  accuracy.
+- **A1 — prior-assisted geometry:** feed-forward multi-view models (**Depth Anything 3, MapAnything,
+  Pi3** — the permissive shipped set; VGGT/MASt3R are reference-only) plus metric monocular depth
+  (**Metric3D v2**, Depth Anything 3) supply dense geometry where a single pass's short baselines make
+  triangulation degenerate.
+- **A2 — metric spine:** one factor graph fuses **visual odometry + GNSS factors** — the only inputs
+  the official contract makes mandatory — and folds in Inertial Measurement Unit (IMU) pre-integration
+  (making it full VIO), barometer and RTK/PPK **when those optional sensors are present**, to fix
+  **scale and georeference without Ground Control Points (GCPs)**, with honest,
+  sensor-configuration-dependent accuracy against the official **≤ 1 m** bar.
 - **A4 — reliability spine:** every stage emits a **confidence** signal and has a **fallback**; the
   system always emits a best-effort model **plus** an uncertainty/coverage report — it never hard-fails.
 - Honest framing: "real-time" means **near-real-time edge preview + minutes-scale ground refinement**,
-  not a full 4K textured mesh computed on the drone in hard real time.
+  not a full 4K textured mesh computed on the drone in hard real time. The official ceiling is
+  **< 15 minutes for a 10-minute video**, end-to-end on the ground tier.
+- **Input contract (official):** only **video (1080p/4K) + GPS + flight metadata** are mandatory. IMU,
+  barometric altitude, camera intrinsics and RTK/PPK are **optional**, so every stage below states what
+  it does on the mandatory-only baseline — intrinsics **self-calibrated**, scale from GNSS baselines +
+  visual structure — and what improves when an optional sensor appears.
 
 This document is the operational companion to the [canonical architecture spec](_internal/CANONICAL-ARCHITECTURE-SPEC.md);
 it introduces no new stages, tiers, or model choices. The *why* lives in [Theory](01-THEORY.md);
@@ -92,11 +99,14 @@ ground, **[E→G]** starts on the edge and is refined on the ground.
 The metric spine begins here: every downstream measurement is only as good as the clock tying frames
 to sensors.
 
-- **Inputs:** camera frames (1080p/4K H.264/H.265), GNSS, IMU, barometer, gimbal encoders, optional
-  RTK correction stream.
+- **Inputs:** *mandatory* — camera frames (1080p/4K H.264/H.265), GNSS/GPS, flight metadata;
+  *optional* — IMU, barometer, gimbal encoders, camera intrinsics, RTK correction stream.
 - **Method:** hardware time-stamping via Pulse-Per-Second (PPS) / Precision Time Protocol (PTP) and
-  GPS-time; align every frame to IMU/GNSS/baro on one monotonic clock; log intrinsics from EXIF or
-  trigger self-calibration; apply the measured camera-to-antenna lever arm.
+  GPS-time; align every frame to GNSS + flight metadata on one monotonic clock, adding IMU/baro to that
+  alignment when present; **default to self-calibrating intrinsics**, using EXIF only as an initial
+  guess when supplied; apply the measured camera-to-antenna lever arm where the geometry is known. A
+  **capability flag** records which optional sensors were actually present, and every downstream stage
+  reads it.
 - **Outputs:** time-synchronized sensor streams with per-sample timestamps and quality flags.
 - **Runs on / latency:** Edge; continuous, with a frame-to-GNSS sync budget **< 2–3 ms** (at 8 m/s,
   10 ms of skew smears position by ~8 cm).
@@ -129,11 +139,13 @@ parallax the one trajectory offers.
 Anchor **A2** in motion: it produces the metric, georeferenced camera trajectory that substitutes for
 the GCP network a single pass cannot survey.
 
-- **Inputs:** keyframes + IMU + GNSS (+ RTK/PPK) + baro.
-- **Method:** real-time **VIO** (OpenVINS / VINS-Fusion) on the edge feeds a **tightly-coupled factor
-  graph** (GTSAM / iSAM2) fusing IMU pre-integration, GNSS factors, barometer, and optional RTK
-  double-difference factors; robust kernels (Huber / Dynamic Covariance Scaling) reject GNSS outliers
-  and multipath. Global refinement continues in S6.
+- **Inputs:** *mandatory* — keyframes + GNSS; *optional* — IMU, RTK/PPK, baro.
+- **Method:** **IMU present** → real-time **VIO** (OpenVINS / VINS-Fusion) on the edge. **IMU absent
+  (the mandatory-only baseline)** → **visual odometry scaled by GNSS baselines**, which is the default
+  path, not a fallback. Either front-end feeds a **factor graph** (GTSAM / iSAM2) whose *required*
+  factors are visual and GNSS, adding IMU pre-integration, barometer and RTK double-difference factors
+  **when available**; robust kernels (Huber / Dynamic Covariance Scaling) reject GNSS outliers and
+  multipath. Global refinement continues in S6.
 - **Outputs:** a metric, gravity-aligned, georeferenced 6-DoF camera trajectory + covariance.
 - **Runs on / latency:** Edge (online), refined on Ground; VIO at 30–100 Hz, iSAM2 incremental
   keyframe updates in milliseconds.
@@ -146,7 +158,8 @@ the GCP network a single pass cannot survey.
 A mover seen once becomes a permanent "ghost", so masking is high-recall and uses two independent cues.
 
 - **Inputs:** keyframes + optical flow.
-- **Method:** **dynamic-object** instance segmentation + tracking (YOLO11-seg / SAM2 + ByteTrack) for
+- **Method:** **dynamic-object** instance segmentation + tracking (RT-DETR / RTMDet + SAM 2 + ByteTrack,
+  all permissively licensed) for
   vehicles/humans/animals; **motion detection** via RAFT optical flow against the epipolar / rigid-flow
   residual (class-agnostic, catches unknown movers); **semantic** labeling (Mask2Former / OneFormer)
   into building/roof, road/infrastructure, vegetation, terrain, obstacle. Dynamic masks are removed
@@ -163,15 +176,19 @@ Anchor **A1**: learned geometry fills exactly the low-parallax regions where sin
 is ill-conditioned (near-zero parallax at the epipole in forward flight).
 
 - **Inputs:** keyframes + poses + masks.
-- **Method:** **metric monocular depth** (Metric3D v2 / UniDepth V2 / Depth Anything V2-metric, Depth
-  Pro for crisp edges) **scale-aligned to the S2 trajectory**; **feed-forward multi-view geometry**
-  (VGGT / MASt3R pointmaps) over local keyframe windows for cross-view consistency; optional learned
-  **MVS** (CasMVSNet / PatchmatchNet) where baselines permit; hard wide-baseline pairs escalate to
-  dense matching (RoMa / DKM). Every product carries **per-pixel confidence**.
+- **Method:** **metric monocular depth** (**Metric3D v2 / Depth Anything 3** — permissive and shipped;
+  Depth Pro for crisp edges) **scale-aligned to the S2 trajectory**; **feed-forward multi-view geometry**
+  (**MapAnything / Pi3 / Depth Anything 3** pointmaps) over local keyframe windows for cross-view
+  consistency; optional learned **MVS** (CasMVSNet / PatchmatchNet) where baselines permit; hard
+  wide-baseline pairs escalate to dense matching (RoMa / DKM). Because intrinsics are optional input,
+  the depth stack runs with **self-calibrated intrinsics** by default. VGGT / MASt3R / UniDepth V2 are
+  **reference-only** (military-use and non-commercial restrictions) and never in the shipped path. Every
+  product carries **per-pixel confidence**.
 - **Outputs:** confidence-weighted metric depth/pointmaps per keyframe — a fast model on the edge, the
   full model on the ground.
 - **Runs on / latency:** Edge (light) → Ground (full); a light metric-depth net in TensorRT INT8 at
-  ~10–30 Hz at reduced resolution on the edge, full-resolution VGGT/MASt3R on the ground.
+  ~10–30 Hz at reduced resolution on the edge, the full-resolution permissive backbone (Depth Anything 3
+  / MapAnything / Pi3) on the ground, inside the < 15 min / 10-min-video budget.
 - **Confidence:** per-pixel depth confidence + multi-view agreement; cross-model disagreement flags
   occlusion or domain-shift failure. **Fallback:** disagreeing regions kept at low confidence;
   monocular-only where multi-view fails.
@@ -196,15 +213,16 @@ operator still gets a usable live map.
 The Refine path opens by tightening the whole trajectory at once.
 
 - **Inputs:** the full keyframe package (frames, poses + covariance, GNSS/RTK/PPK, depth, masks).
-- **Method:** global **bundle adjustment (BA)** / pose-graph optimization with **GNSS + IMU + optional
-  RTK/PPK factors** and depth/pointmap constraints (GTSAM / COLMAP-style global mapper à la GLOMAP /
-  VGGT-consistent); camera **self-calibration** with intrinsics held as a strong prior; loop / overlap
-  closure wherever the single path self-intersects.
+- **Method:** global **bundle adjustment (BA)** / pose-graph optimization with **required GNSS factors**
+  plus **IMU and RTK/PPK factors when those optional inputs exist**, and depth/pointmap constraints
+  (GTSAM / GLOMAP-style global mapper); camera **self-calibration is the default** — intrinsics are
+  solved here, held as a strong prior only when the operator supplied them; loop / overlap closure
+  wherever the single path self-intersects.
 - **Outputs:** a globally consistent metric camera set + refined sparse structure + accuracy covariance.
 - **Runs on / latency:** Ground; **minutes** for a single-pass scene — global SfM is 1–2 orders of
   magnitude faster than incremental COLMAP.
 - **Confidence:** posterior covariance and reprojection RMSE. **Fallback:** if BA diverges, keep the
-  VIO+GNSS prior poses from S2 and flag reduced global accuracy.
+  S2 prior poses (VO+GNSS, or VIO+GNSS where an IMU was present) and flag reduced global accuracy.
 
 ### S7 — Dense Reconstruction & 3DGS **[G]**
 
@@ -212,8 +230,9 @@ Where the photorealistic, measurable dense scene is built — and where occlusio
 honestly (completed regions are flagged, never presented as measured).
 
 - **Inputs:** optimized poses + keyframes + depth priors + masks.
-- **Method:** **few-shot 3D Gaussian Splatting (3DGS)** initialized from feed-forward geometry
-  (InstantSplat-style init from VGGT/MASt3R) with **depth + normal + confidence regularization** to
+- **Method:** **few-shot 3D Gaussian Splatting (3DGS, gsplat)** initialized from the permissive
+  feed-forward backbone (InstantSplat-style init from Depth Anything 3 / MapAnything / Pi3) with
+  **depth + normal + confidence regularization** to
   fight single-pass under-constraint (the fix for floaters); **per-image appearance embeddings** to
   absorb illumination/shadow variation over the flight; **occlusion completion** via learned +
   geometric priors (planarity/symmetry for man-made structure), completed regions flagged
@@ -257,12 +276,14 @@ Produces the deliverables in open formats plus the accuracy & confidence report 
 auditable.
 
 - **Inputs:** all products.
-- **Method:** export **LAS/LAZ, PLY, OBJ/glTF/GLB, OGC 3D Tiles, GeoTIFF (Cloud-Optimized) DSM/DTM/
-  ortho, CityJSON**; generate the **accuracy & confidence report** (RMSE, GSD, coverage %, occlusion
-  map); publish to a web viewer (CesiumJS / Potree) with a measurement API; write a **reproducible
-  project bundle** (video reference, poses, calibration, logs, metadata).
+- **Method:** export the **official required set — OBJ, PLY, LAS, GeoTIFF, .glb/.gltf, .fbx** — plus
+  our additions (LAZ, OGC 3D Tiles, CityJSON, COG); generate the **accuracy & confidence report**
+  (RMSE, GSD, coverage %, occlusion map, **explicit flags on any region past the ≤ 1 m bar**); publish
+  to the **web-based or desktop viewer** (CesiumJS / Potree) with a measurement API; write a
+  **reproducible project bundle** (video reference, poses, calibration, logs, metadata).
 - **Outputs:** the full deliverable set + the accuracy/confidence report.
-- **Runs on / latency:** Ground / Cloud; seconds-to-minutes.
+- **Runs on / latency:** Ground / Cloud; seconds-to-minutes — the tail of the **< 15 min / 10-min-video**
+  end-to-end budget.
 - **Confidence:** the whole-model accuracy report. **Fallback:** always emit at least a point cloud +
   report.
 
@@ -287,12 +308,15 @@ flowchart LR
   BA -.->|"refined poses"| POSE
 ```
 
-**How scale is fixed without GCPs.** The IMU (accelerometer + observed gravity) and GNSS baselines
-supply metric scale, removing the monocular scale ambiguity. Forster-style on-manifold IMU
-pre-integration summarizes accelerometer/gyro between keyframes into one relative-motion factor that
-observes gravity direction and scale; the metric monocular depth from S4 gives an independent per-frame
-scale check. Scale drift over a straight corridor is reducible to roughly **1–2%** with metric-depth
-priors, versus ~5–15% for pure monocular VIO (externally reported).
+**How scale is fixed without GCPs.** On the **mandatory-only baseline (video + GPS + flight metadata,
+no IMU)**, metric scale comes from **GNSS baselines between keyframes** — the flight itself is the
+ruler — cross-checked per frame by the metric monocular depth from S4, with intrinsics self-calibrated
+so focal length cannot silently absorb scale error. **When an IMU is present**, Forster-style
+on-manifold pre-integration adds a relative-motion factor that observes gravity direction and scale
+directly, tightening the solution further. Scale drift over a straight corridor is reducible to roughly
+**1–2%** with metric-depth priors, versus ~5–15% for pure monocular VIO (externally reported) — and
+GNSS-baseline geometry (path length, turn diversity) is the dominant conditioning factor on the
+no-IMU baseline.
 
 **How georeference is fixed.** GNSS (+ RTK/PPK) anchors the local metric solution to an absolute datum.
 DRISHTI aligns the reconstructed camera-centre trajectory to the GNSS track — a 7-DoF Sim(3) Umeyama
@@ -308,9 +332,12 @@ contributes global constraints with fewer than four satellites — valuable in G
 terrain. Opportunistic in-scene GCPs can be added as extra factors but are **not required**.
 
 This yields the tiered accuracy honesty stated in the
-[Problem Statement](_internal/PROBLEM_STATEMENT.md): **RTK/PPK → few-cm absolute; GNSS-only →
-sub-metre absolute with strong (decimetre) relative; GNSS-denied → local metric map, georeferenced on
-re-acquire.**
+[Problem Statement](_internal/PROBLEM_STATEMENT.md), all measured against the official **≤ 1 m** bar:
+**RTK/PPK → few-cm absolute (clears the bar comfortably); GNSS + IMU → sub-metre horizontal, vertical
+flagged where it passes 1 m; GNSS-only (the mandatory-input baseline) → target ≤ 1 m absolute with
+strong (decimetre) relative, every region past 1 m flagged; GNSS-denied → local metric map,
+georeferenced on re-acquire.**
+
 
 ---
 
@@ -388,13 +415,15 @@ proxy.
 store-and-forwarded; any telemetry gaps are backfilled.
 
 **t + 0 → ~10 min — the Refine path (S6–S10) on the Ground Tier RTX GPU.**
-- **S6 (~1–3 min):** global bundle adjustment with GNSS/RTK factors and fixed intrinsics ties the pass
-  into one globally consistent metric camera set with covariance.
-- **S7 (~2–4 min):** InstantSplat-style few-shot 3DGS, initialized from VGGT/MASt3R pointmaps and
+- **S6 (~1–3 min):** global bundle adjustment with GNSS (+ RTK where present) factors and
+  self-calibrated intrinsics ties the pass into one globally consistent metric camera set with covariance.
+- **S7 (~2–4 min):** InstantSplat-style few-shot 3DGS (gsplat), initialized from the permissive
+  feed-forward pointmaps (Depth Anything 3 / MapAnything / Pi3) and
   regularized by depth/normal/confidence, builds the dense scene; per-image appearance embeddings
   reconcile the sun-angle shift; the never-imaged **underside of the deck between piers is completed
   from planarity/symmetry priors and flagged low-confidence**.
-- **S8 (~2–3 min):** 2DGS/SuGaR extracts a watertight, textured multi-LOD mesh.
+- **S8 (~2–3 min):** 2DGS/SuGaR extracts a watertight, textured multi-LOD mesh — the whole S6–S10 tail
+  stays inside the official **< 15 min for a 10-min video** budget.
 - **S9 (~1 min):** the model is projected to the correct UTM zone with a geoid for orthometric height;
   semantics propagate; DSM/DTM and true orthomosaic are rasterized; the **bridge span, deck width, and
   vertical clearance** are measured, each carrying a confidence value.
@@ -463,14 +492,14 @@ canonical spec's traceability matrix and names the **exact stages** that carry e
 
 | # | Key challenge | DRISHTI mechanism | Stages |
 |---|---------------|-------------------|--------|
-| i | **Limited viewing angles** | Feed-forward multi-view priors (VGGT/MASt3R) + metric monocular depth reconstruct where short baselines make triangulation degenerate; oblique-gimbal capture SOP manufactures angle diversity; occlusion completed and honestly flagged | **S4**, capture SOP (**S0**), **S7** |
-| ii | **Motion blur & compression artifacts** | Blur gating (variance-of-Laplacian + IMU rate) + reject-first deblur keep bad frames out; artifact-tolerant dense matching (RoMa/DKM) rescues hard pairs; reconstruct from near-raw onboard frames, not the lossy downlink | **S1**, **S4** |
+| i | **Limited viewing angles** | Feed-forward multi-view priors (Depth Anything 3 / MapAnything / Pi3) + metric monocular depth reconstruct where short baselines make triangulation degenerate; oblique-gimbal capture SOP manufactures angle diversity; occlusion completed and honestly flagged | **S4**, capture SOP (**S0**), **S7** |
+| ii | **Motion blur & compression artifacts** | Blur gating (variance-of-Laplacian + an angular-rate cross-check: IMU where fitted, optical-flow-derived by default) + reject-first deblur keep bad frames out; artifact-tolerant dense matching (RoMa/DKM) rescues hard pairs; reconstruct from near-raw onboard frames, not the lossy downlink | **S1**, **S4** |
 | iii | **Variable illumination & shadows** | Exposure normalization at ingest; per-image appearance embeddings + lighting-robust depth absorb sun-angle shift; moving shadows masked so they are not reconstructed | **S1**, **S4/S7** |
-| iv | **Dynamic objects** | Two-cue masking — semantic seg+track (YOLO11-seg/SAM2+ByteTrack) + class-agnostic epipolar/optical-flow motion residual — removes movers before fusion; residual movers rejected by confidence-weighted TSDF | **S3/S5** |
-| v | **GPS inaccuracy & sensor noise** | Tightly-coupled factor graph with robust kernels (Huber/DCS), GNSS outlier rejection, and RTK/PPK factors; global BA with GNSS priors | **S2/S6** |
+| iv | **Dynamic objects** | Two-cue masking — semantic seg+track (RT-DETR/RTMDet + SAM 2 + ByteTrack) + class-agnostic epipolar/optical-flow motion residual — removes movers before fusion; residual movers rejected by confidence-weighted TSDF | **S3/S5** |
+| v | **GPS inaccuracy & sensor noise** | Factor graph with robust kernels (Huber/DCS) and GNSS outlier rejection — GNSS being a *mandatory* input, this is the load-bearing case; RTK/PPK and IMU factors tighten it when those optional inputs exist; global BA with GNSS priors | **S2/S6** |
 | vi | **Real-time / near-real-time processing** | Two-path split — edge Live path (S0–S5) + ground Refine path (S6–S10); TensorRT INT8/FP16; incremental nvblox TSDF; progressive LOD | **S1–S5** |
 | vii | **Reconstruction of occluded surfaces** | Learned + geometric completion priors (planarity/symmetry), multi-view where any parallax exists, completed regions rendered as a distinct low-confidence layer and excluded from measurement | **S7** |
-| viii | **Metric accuracy without extensive GCPs** | GNSS/RTK/PPK + IMU + baro scale and datum through the factor graph; GNSS-prior bundle adjustment; camera self-calibration; uncertainty carried into the accuracy report | **S2/S6/S9** |
+| viii | **Metric accuracy without extensive GCPs** | GNSS baselines + visual structure scale and datum through the factor graph (RTK/PPK, IMU and baro fold in when present); GNSS-prior bundle adjustment; camera self-calibration as the default path; uncertainty carried into the accuracy report, with any region past the official **≤ 1 m** bar flagged | **S2/S6/S9** |
 
 ---
 
@@ -486,10 +515,11 @@ not to pretend uniform survey-grade accuracy.
 - **Absolute accuracy** comes from the metric spine (§3). With **RTK/PPK**, direct georeferencing
   reaches roughly **1–3 cm horizontal and 2–7 cm vertical RMSE with no GCPs** (externally reported for
   RTK UAV surveys), consistent with DRISHTI's L0 design target of 3–8 cm H / 5–12 cm V. With
-  **GNSS-only** the target is sub-metre absolute (~0.5–2 m) but still decimetre-level **relative** after
-  Sim(3)+IMU fusion.
-- **Metric scale** where parallax is thin comes from IMU pre-integration + metric monocular depth, not
-  from triangulation.
+  **GNSS-only** — the mandatory-input baseline — the target is **≤ 1 m** absolute (0.5–2 m envelope by
+  GPS quality) but still decimetre-level **relative** after Sim(3) fusion, with every region that would
+  exceed the official 1 m bar explicitly flagged rather than averaged into a headline number.
+- **Metric scale** where parallax is thin comes from GNSS baselines + metric monocular depth (plus IMU
+  pre-integration when an IMU is present), not from triangulation.
 
 Design targets by configuration (from the canonical accuracy budget, ~80 m AGL):
 
@@ -540,10 +570,11 @@ report. It never crashes silently or emits unflagged garbage.
 
 ## Open questions / risks
 
-- **Aerial domain gap.** VGGT/MASt3R and the metric-depth models are trained mostly on ground-level,
+- **Aerial domain gap.** The feed-forward and metric-depth models (Depth Anything 3, MapAnything, Pi3,
+  Metric3D v2 — and the reference-only VGGT/MASt3R family) are trained mostly on ground-level,
   automotive, and object-centric data; high-altitude nadir/oblique drone imagery is out-of-distribution,
   so metric accuracy at flight altitude is unproven and may need fine-tuning on aerial data. Published
-  benchmark numbers will not transfer directly.
+  benchmark numbers are *as reported by those methods' authors* and will not transfer directly.
 - **Proving cm accuracy without GCPs is not free.** It requires RTK/PPK plus accurate lever-arm and
   time-sync calibration, and at least a few independent survey checkpoints to *validate* (even if not
   to constrain). Vertical bias with zero ground control realistically budgets to ~5–10 cm.
@@ -551,13 +582,16 @@ report. It never crashes silently or emits unflagged garbage.
   plausible-but-wrong geometry in unseen/low-confidence regions — dangerous for measurement unless
   rigorously confidence-flagged and excluded, as designed. Learned confidence is often poorly
   calibrated on out-of-domain content and needs empirical recalibration on drone data.
-- **Licensing for defense deployment.** Several strong checkpoints carry non-commercial or explicitly
-  no-military licenses (VGGT's commercial checkpoint excludes military use; MASt3R weights are
-  CC-BY-NC-SA; Depth Anything V2 Base/Large are CC-BY-NC; Ultralytics YOLO is AGPL-3.0). A deployable
-  NTRO build must be assembled from permissively-licensed components (Metric3D BSD, SuperPoint/DISK/
-  LightGlue Apache, RoMa MIT, GTSAM BSD) or retrained/licensed equivalents. Tracked in the
+- **Licensing for defense deployment — settled, not open.** Military reconnaissance & mission planning
+  is an explicit official application, so every non-commercial or no-military checkpoint is
+  **reference-only and never shipped**: VGGT's commercial checkpoint excludes military use, DUSt3R/MASt3R
+  are CC BY-NC, UniDepth V2 is CC BY-NC-SA, and Ultralytics YOLO is AGPL-3.0. The deployable NTRO build
+  ships permissive components exclusively — **Depth Anything 3, MapAnything, Pi3, Metric3D v2, gsplat,
+  GLOMAP/COLMAP, RT-DETR, SAM2**, plus GTSAM (BSD), SuperPoint/DISK/LightGlue (Apache) and RoMa (MIT).
+  What remains open is only the *accuracy cost* of that substitution. Tracked in the
   [Technology Stack](03-TECHNOLOGY-STACK.md).
-- **Edge compute headroom.** The heavy transformers (VGGT ~1.2B params) exceed the Orin NX 16 GB budget
+- **Edge compute headroom.** The heavy feed-forward transformers (~1B+ params in this class) exceed the Orin NX 16 GB budget
+
   and are near-real-time at best even on AGX Orin; the design deliberately keeps them on the Ground
   Tier. Thermal throttling on a power-constrained UAV must be monitored and wired into the degradation
   ladder, not discovered post-hoc.

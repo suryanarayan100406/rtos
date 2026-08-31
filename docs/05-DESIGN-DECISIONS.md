@@ -6,9 +6,11 @@
 
 **TL;DR**
 
-- Fifteen decisions define DRISHTI. The through-line: **the single-pass, no-second-look constraint changes the right answer** at nearly every step versus a conventional multi-pass photogrammetry pipeline.
+- Seventeen decisions define DRISHTI. The through-line: **the single-pass, no-second-look constraint changes the right answer** at nearly every step versus a conventional multi-pass photogrammetry pipeline.
+- Every decision is scored against the **official weighted rubric** (PS-17 / SIH26158) — reconstruction accuracy **30%**, model completeness **20%**, processing speed **20%**, innovation **15%**, scalability **10%**, user interface **5%** — and against the hard targets: **≤ 1 m** spatial accuracy, **< 15 min for a 10-minute video**, full visible-scene coverage, **OBJ · PLY · LAS · GeoTIFF · .glb/.gltf · .fbx**, web or desktop viewer.
+- The input bet (ADR-16): **design for the mandatory inputs alone** — video + GPS + flight metadata, intrinsics self-calibrated — and treat IMU, barometer, RTK/PPK and operator-supplied intrinsics as *optional upgrades*, because that is exactly what the official contract makes them.
 - The biggest bet (ADR-01): **prior-assisted feed-forward geometry** over classical Structure-from-Motion (SfM) as the primary path — because short single-pass baselines starve triangulation — with classical SfM kept as the verifiable fallback, not discarded.
-- The metric bet (ADR-03/04): **sensor-injected scale from a tightly-coupled GNSS+IMU+visual factor graph**, not learned-only scale and not Ground Control Points (GCPs) — the only way to be metric *and* GCP-free in one pass.
+- The metric bet (ADR-03/04): **sensor-injected scale from a factor graph whose required factors are visual + GNSS** (IMU, baro and RTK/PPK folded in when those optional sensors exist), not learned-only scale and not Ground Control Points (GCPs) — the only way to be metric *and* GCP-free in one pass.
 - The reliability bet (ADR-09): **confidence is a first-class output at every stage**, and every stage has a fallback — so the system degrades gracefully instead of hard-failing.
 - The honesty bet, present in every ADR's trade-off section: we name what we *lose* (absolute accuracy on planned GCP missions, facade completeness, mesh polish) versus offline incumbents, and why the single-pass niche is still worth owning.
 - Trade-offs and external numbers follow the project honesty policy: performance figures attributed to a method are **as reported by its authors**; our targets are labelled *(design target — to be measured)*.
@@ -51,6 +53,8 @@ ADRs are immutable once accepted; a superseding decision gets a new number and r
 | 13 | nvblox (edge) + Open3D (ground) for fusion | Right fusion engine per tier |
 | 14 | Dual-track hardware: DJI COTS + PX4 open/sovereign | De-risk procurement & sovereignty |
 | 15 | Explicit CRS/geoid handling (UTM + EGM2008) | Orthometric height, not ellipsoidal |
+| 16 | Design to the mandatory input contract; optional sensors are upgrades | Only video + GPS + metadata are guaranteed |
+| 17 | Ship the official format set + both viewers; GPL writers out-of-process | `.fbx` and the viewer are graded deliverables |
 
 ---
 
@@ -77,15 +81,15 @@ ADRs are immutable once accepted; a superseding decision gets a new number and r
 ### ADR-03 — Sensor-injected metric scale, not learned-only scale, not GCPs
 
 - **Context.** The deliverable is a **metric, georeferenced** model **without** placing GCPs (which would defeat rapid single-pass survey). Monocular vision is scale-ambiguous; learned metric depth is impressive but not survey-grade on its own; GCPs are accurate but operationally expensive and slow.
-- **Options.** (a) GCPs (classical photogrammetry); (b) learned metric depth alone for scale; (c) fuse onboard GNSS(+RTK/PPK)+IMU to inject metric scale and georeference, using learned depth only as a *relative* prior.
-- **Decision.** Option (c): **the sensor suite sets absolute scale and georeference**; learned depth contributes relative structure and gets scale-aligned to the sensor-anchored trajectory (7-DoF Umeyama/Sim3 alignment + GNSS-prior bundle adjustment). This is the **metric spine (anchor A2)**.
-- **Rationale (single-pass angle).** RTK/PPK GNSS gives centimetre-class positions along the flight path with zero ground setup — the one metric anchor available in a single autonomous pass. Learned depth alone would leave us with plausible-but-unverifiable scale.
-- **Trade-offs & risks.** Accuracy becomes **sensor-configuration-dependent**: centimetre-class with RTK/PPK (Regime A), sub-metre to metre-class GPS-only (Regime B). Vertical accuracy is the weak axis. We state this explicitly rather than claiming a single accuracy number — per the honesty policy and the [Evaluation Criteria](_internal/PROBLEM_STATEMENT.md) two-regime table.
+- **Options.** (a) GCPs (classical photogrammetry); (b) learned metric depth alone for scale; (c) fuse onboard GNSS (+ RTK/PPK and IMU where fitted) to inject metric scale and georeference, using learned depth only as a *relative* prior.
+- **Decision.** Option (c): **the sensor suite sets absolute scale and georeference**; learned depth contributes relative structure and gets scale-aligned to the sensor-anchored trajectory (7-DoF Umeyama/Sim3 alignment + GNSS-prior bundle adjustment). This is the **metric spine (anchor A2)**. Because GPS is the *only* mandatory positioning input, the load-bearing case is **GNSS baselines + visual structure with self-calibrated intrinsics** (ADR-16); RTK/PPK and IMU tighten it when present.
+- **Rationale (single-pass angle).** The GNSS track is the one metric anchor available in a single autonomous pass with zero ground setup — thousands of soft control points along the flight line, centimetre-class when RTK/PPK happens to be fitted. Learned depth alone would leave us with plausible-but-unverifiable scale.
+- **Trade-offs & risks.** Accuracy becomes **sensor-configuration-dependent**, and it is measured against the official **≤ 1 m** bar: centimetre-class with RTK/PPK (Regime A), **target ≤ 1 m** on the GPS-only mandatory baseline (Regime B, 0.5–2 m envelope by GPS quality). Vertical accuracy is the weak axis. We state this explicitly rather than claiming a single accuracy number — and **flag any region that would exceed 1 m** instead of averaging it away — per the honesty policy and the [Evaluation Criteria](_internal/PROBLEM_STATEMENT.md) tables.
 - **Revisit if.** A future learned model demonstrates survey-grade metric accuracy from vision alone (then sensors become a cross-check, not the anchor), or a mission profile permits sparse GCPs for a hybrid boost.
 
 ### ADR-04 — Tightly-coupled factor graph over loose EKF fusion
 
-- **Context.** We must fuse GNSS, IMU, visual odometry, RTK corrections, and barometer into one trajectory. A loosely-coupled Extended Kalman Filter (EKF) fuses *post-hoc estimates*; a tightly-coupled factor graph fuses *raw measurements* jointly.
+- **Context.** We must fuse visual odometry and GNSS — the mandatory pair — plus IMU, RTK corrections and barometer *when those optional inputs exist*, into one trajectory. A loosely-coupled Extended Kalman Filter (EKF) fuses *post-hoc estimates*; a tightly-coupled factor graph fuses *raw measurements* jointly. The graph shape must therefore be **variable**: which factor types are instantiated depends on the capture capability flag, not on a fixed sensor suite.
 - **Options.** (a) Loosely-coupled EKF (simpler, common in flight controllers); (b) tightly-coupled factor-graph smoothing (GTSAM/iSAM2) fusing raw factors with global bundle adjustment on the ground.
 - **Decision.** **Tightly-coupled factor graph** (GTSAM iSAM2), incrementally on the edge and re-optimized globally on the ground.
 - **Rationale (single-pass angle).** With only one pass and no loop closures from revisiting, every measurement counts. Jointly optimizing raw GNSS/IMU/visual factors extracts maximum consistency and yields per-estimate covariance — which feeds the confidence spine (ADR-09). A loose EKF discards cross-correlations we cannot afford to lose.
@@ -191,23 +195,54 @@ ADRs are immutable once accepted; a superseding decision gets a new number and r
 - **Trade-offs & risks.** Geoid grids must be bundled for offline/air-gapped use; wrong zone selection is a footgun. Mitigation: derive zone from GNSS, validate against telemetry, and record datum in metadata.
 - **Revisit if.** A deployment standardizes on a different national CRS/geoid (swap the grids; the mechanism is unchanged).
 
+### ADR-16 — Design to the mandatory input contract; optional sensors are upgrades
+
+- **Context.** The official problem statement makes only **drone video (1080p/4K), GPS coordinates and flight metadata** mandatory. IMU, barometric altitude, camera intrinsics and RTK/PPK are listed as **optional**. A design that quietly assumes an IMU or a calibration file is a design that fails on the dataset we are actually handed.
+- **Options.** (a) Assume the full sensor suite and degrade if something is missing; (b) design the mandatory-only configuration as the *reference* path and treat every optional sensor as an additive upgrade; (c) build two separate pipelines.
+- **Decision.** Option (b). The **reference configuration is video + GPS + flight metadata, with self-calibrated intrinsics and scale from GNSS baselines + visual structure**. Optional sensors enter as *additional factors* in the same graph (ADR-04) and *additional constraints* on the same depth stack — never as prerequisites. A **capability flag** travels with every keyframe (see [Integration](04-INTEGRATION.md) §2) and every stage branches on it explicitly.
+- **Rationale (single-pass angle).** This inverts the usual failure mode. Calling the no-IMU, no-RTK, unknown-intrinsics case a "fallback" makes it the least-tested path — and it is the *only* path the contract guarantees. Making it the reference means our headline numbers are numbers an evaluator can actually reproduce.
+- **Trade-offs & risks.** We give up the gravity prior and inertial scale observability in the reference case, so scale conditioning rests on GNSS-baseline geometry (path length, turn diversity) and vertical uncertainty is wider. Self-calibration can trade focal length against scale on a straight, constant-height pass. Mitigations: parallax-aware keyframe selection (S1), metric-depth cross-checks on scale (S4), focal-length priors from the depth backbone, and honest per-region flagging wherever the ≤ 1 m bar is at risk.
+- **Revisit if.** The provided dataset turns out to carry full IMU + RTK + calibration (then Regime A becomes the headline and this stays the guaranteed floor), or a capture SOP can mandate a minimum turn diversity for scale conditioning.
+
+### ADR-17 — Ship the official format set and both viewers; GPL writers run out-of-process
+
+- **Context.** The Desired Output names specific formats — **OBJ, PLY, LAS, GeoTIFF, .glb/.gltf, .fbx** — and a **web-based or desktop viewer**; *User Interface* is 5% of the score and *Model Completeness* 20%. `.fbx` is the awkward one: an Autodesk format with no mature permissive native writer, while our licensing posture (ADR-14, [Technology Stack §5](03-TECHNOLOGY-STACK.md)) forbids shipping restricted code into a military-scope build.
+- **Options.** (a) Skip `.fbx` and offer glTF as "equivalent"; (b) link the Autodesk FBX SDK; (c) write `.fbx` by driving headless Blender as an **isolated CLI process**; (d) hand-roll an FBX writer.
+- **Decision.** Option (c) for `.fbx`, with the rest of the set produced natively (GDAL for GeoTIFF, PDAL for LAS/LAZ, trimesh/Assimp for OBJ and glTF/GLB). Ship **both** viewers: a web viewer (CesiumJS/Potree over streamed OGC 3D Tiles) *and* a desktop path (QGIS/CloudCompare), each with measurement tools and a per-region confidence overlay. QGIS and Blender are separate GPL applications we invoke, never libraries we link.
+- **Rationale (single-pass angle).** A single pass produces one authoritative model, so its portability *is* its value — the deliverable must open in the evaluator's tool of choice with no DRISHTI-specific reader. Two viewers also mean the confidence/coverage layer (ADR-09) is visible in whichever environment the operator already uses, which is where completeness is actually judged.
+- **Trade-offs & risks.** Out-of-process `.fbx` adds a heavyweight dependency and a slower export step; a hand-rolled writer would be lighter but is a correctness risk on a format we do not control. Two viewers double the UI surface for a 5% criterion. Mitigations: `.fbx` is generated in the export tail (S10) where minutes are available inside the < 15 min budget, and both viewers share one tiled data source and one measurement API ([Integration](04-INTEGRATION.md) §8) rather than being two products.
+- **Revisit if.** A permissive, well-tested FBX writer matures (drop the Blender hop), or the evaluator standardizes on one viewer.
+
 ---
 
 ## 4. Cross-cutting trade-off map
 
-How each decision serves the [Evaluation Criteria](_internal/PROBLEM_STATEMENT.md) and answers a specific single-pass challenge (challenge→mechanism matrix in the [spec §9](_internal/CANONICAL-ARCHITECTURE-SPEC.md)):
+First, against the **official weighted rubric** — which decisions carry which percentage:
 
-| Challenge (single-pass) | Decision(s) | Evaluation criterion served |
-|-------------------------|-------------|-----------------------------|
-| Short baselines starve triangulation | ADR-01, 06 | Geometric completeness; reconstruction of structures |
-| Metric scale without GCPs | ADR-03, 04, 15 | Absolute/relative accuracy (both regimes) |
-| Bleeding-edge models OOD on aerial | ADR-02 | Robustness; reliability |
-| "Real-time" vs "accurate" tension | ADR-05, 11, 13 | Timeliness; near-real-time preview |
-| Moving objects → permanent ghosts | ADR-08 | Model cleanliness; dynamic-object handling |
-| No second look to catch errors | ADR-09, 12 | Uncertainty reporting; auditability |
-| Link loss / contested comms | ADR-12, 14 | Reliability; data sovereignty |
-| Sovereign, offline deployment | ADR-14, 12, 15 | Deployability in NTRO context |
-| Cross-tier determinism & reuse | ADR-10, 13 | Engineering robustness; reproducibility |
+| Official criterion | Weight | Load-bearing decisions |
+|--------------------|--------|------------------------|
+| **Reconstruction accuracy** | **30%** | ADR-03, 04, 15, 16 — metric spine, variable factor graph, CRS/geoid, self-calibrated mandatory-input baseline |
+| **Model completeness** | **20%** | ADR-01, 02, 06, 07, 09 — prior-assisted geometry, few-shot 3DGS, meshing, coverage & confidence report |
+| **Processing speed** | **20%** | ADR-05, 11, 13 — two paths, TensorRT INT8/FP16, right fusion engine per tier; budgeted to < 15 min / 10-min video |
+| **Innovation** | **15%** | ADR-01, 03, 09, 16 — prior-assisted single-pass orchestration, confidence as a first-class output, mandatory-input-first design |
+| **Scalability** | **10%** | ADR-05, 10, 12, 14 — three tiers, ROS 2 data plane, store-and-forward, dual-track hardware |
+| **User interface** | **5%** | ADR-17, 09 — web + desktop viewer, measurement API, confidence overlay |
+
+Then, how each decision answers a specific single-pass challenge (challenge→mechanism matrix in the [spec §9](_internal/CANONICAL-ARCHITECTURE-SPEC.md)):
+
+| Challenge (single-pass) | Decision(s) | Official criterion served |
+|-------------------------|-------------|---------------------------|
+| Short baselines starve triangulation | ADR-01, 06 | Model completeness (20%) |
+| Metric scale without GCPs | ADR-03, 04, 15 | Reconstruction accuracy (30%) — both regimes vs the ≤ 1 m bar |
+| Only video + GPS + metadata are guaranteed | ADR-16, 03 | Reconstruction accuracy (30%); innovation (15%) |
+| Bleeding-edge models OOD on aerial | ADR-02 | Reconstruction accuracy (30%); robustness |
+| "Real-time" vs "accurate" tension | ADR-05, 11, 13 | Processing speed (20%) — < 15 min / 10-min video |
+| Moving objects → permanent ghosts | ADR-08 | Model completeness (20%); cleanliness |
+| No second look to catch errors | ADR-09, 12 | Reconstruction accuracy (30%); auditability |
+| Deliverables must open in the evaluator's tools | ADR-17 | User interface (5%); model completeness (20%) |
+| Link loss / contested comms | ADR-12, 14 | Scalability (10%); reliability; data sovereignty |
+| Sovereign, offline deployment | ADR-14, 12, 15 | Deployability in the NTRO context |
+| Cross-tier determinism & reuse | ADR-10, 13 | Scalability (10%); reproducibility |
 
 **What we knowingly lose** (the honest column): against offline photogrammetry incumbents (Pix4D, Metashape, DJI Terra, RealityCapture, ContextCapture, OpenDroneMap) on a *planned multi-pass mission with GCPs*, we expect to lose on **absolute accuracy, facade completeness, and final mesh polish**. Against real-time SLAM/VIO systems we produce a far richer product than their sparse maps. Against NeRF/GS cloud services we are metric, georeferenced, and offline where they are not. DRISHTI's defensible niche — confirmed by the [competitive landscape](_internal/research/8-competitive-landscape.md) — is **single-pass → georeferenced metric textured 3D, near-real-time, with graceful degradation**, which no incumbent currently occupies. We compete there, not on incumbents' home turf.
 
@@ -215,7 +250,9 @@ How each decision serves the [Evaluation Criteria](_internal/PROBLEM_STATEMENT.m
 
 ## Open questions / risks
 
-- **Backbone reconciliation.** ADR-02's shipped backbone is the permissive default (Depth Anything 3 / MapAnything), which differs from the spec's registry naming (VGGT/MASt3R). This must be folded into [`CANONICAL-ARCHITECTURE-SPEC.md`](_internal/CANONICAL-ARCHITECTURE-SPEC.md) §7 — tracked jointly with [Technology Stack §5](03-TECHNOLOGY-STACK.md).
+- **Cost of the permissive backbone.** ADR-02's shipped backbone (Depth Anything 3 / MapAnything / Pi3) is now also what [`CANONICAL-ARCHITECTURE-SPEC.md`](_internal/CANONICAL-ARCHITECTURE-SPEC.md) §7 registers, so the naming is reconciled. What remains open is the *accuracy cost* of ruling out the restricted VGGT/MASt3R family — it must be measured on aerial data, not assumed negligible. Tracked jointly with [Technology Stack §5](03-TECHNOLOGY-STACK.md).
+- **Scale conditioning with no IMU (ADR-16).** On the mandatory-only baseline there is no gravity prior and no inertial scale observability. Whether GNSS-baseline geometry alone holds the ≤ 1 m bar on a straight-line, constant-height pass is the single biggest unmeasured risk in the design, and the first thing to test on the provided dataset.
+
 - **Aerial fine-tuning is a plan, not a result.** ADR-01/02/06 assume domain fine-tuning brings feed-forward metric accuracy into budget; this is unproven until measured on aerial data (owned with [AI/Deep Learning](roles/3-ai-deep-learning-research.md)).
 - **Confidence calibration** (ADR-09) must itself be validated — an uncalibrated confidence is worse than none.
 - **Edge smoothing bound** (ADR-04) and **INT8 accuracy** (ADR-11) both need measurement on the event hardware.

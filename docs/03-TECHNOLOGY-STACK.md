@@ -11,6 +11,8 @@
 - **Licensing is a first-class design constraint, not an afterthought.** Several state-of-the-art (SOTA) models are research-only or explicitly exclude military use (VGGT's commercial checkpoint, DUSt3R/MASt3R, UniDepth V2). DRISHTI therefore ships a **permissively-licensed default backbone** (Depth Anything 3, MapAnything, Pi3, Metric3D v2, gsplat, GLOMAP/COLMAP — all CC-BY / Apache / BSD) and keeps the research models only as a benchmark reference. See §5.
 - Every learned component emits a **confidence/uncertainty** signal; every layer names a **classical fallback** so nothing hard-fails (the reliability spine, A4).
 - The whole stack runs **fully offline / air-gapped on Indian soil**, supports **NavIC/IRNSS** in the positioning layer, and every third-party model can be retrained or replaced with an indigenous one — the sovereignty posture NTRO needs (§6).
+- **The stack is sized to the official bar** (PS-17 / SIH26158): spatial accuracy **≤ 1 m**, processing **< 15 minutes for a 10-minute video**, coverage of the entire visible scene, exports in **OBJ · PLY · LAS · GeoTIFF · .glb/.gltf · .fbx**, and a **web-based or desktop viewer** — every table below names the component that carries one of those.
+- **Only video (1080p/4K) + GPS + flight metadata are mandatory inputs.** IMU, barometric altitude, camera intrinsics and RTK/PPK are *optional*, so the default configuration is **self-calibrated intrinsics + GNSS-baseline scale**, and each table marks what an optional sensor adds rather than assuming it.
 - Numbers below marked *(design target)* are engineering goals to be measured on the event dataset; performance figures attributed to a method are **as reported by that method's authors**.
 
 ---
@@ -50,7 +52,7 @@ flowchart TB
     C3[RAFT optical flow]
   end
   subgraph GEO["Geometry & depth — S4"]
-    D1[Feed-forward: Depth Anything 3 / MapAnything / VGGT]
+    D1[Feed-forward: Depth Anything 3 / MapAnything / Pi3]
     D2[Metric depth: Metric3D v2 / Depth Pro]
     D3[Dense matching: RoMa / LightGlue]
   end
@@ -87,10 +89,12 @@ Each table: **Role · Adopted (default build) · Version/commit · License · Wh
 | Role | Adopted (default) | Version | License | Why (single-pass) | Alternatives |
 |------|-------------------|---------|---------|-------------------|--------------|
 | Real-time Visual-Inertial Odometry (VIO) | OpenVINS | 2.7.x | GPL-3.0 ⚠(copyleft) | Filter-based VIO gives metric, gravity-aligned pose live on the edge from one moving camera + Inertial Measurement Unit (IMU) — the single-pass pose backbone | VINS-Fusion (GPL-3.0), ORB-SLAM3 (GPL-3.0), Kimera, DROID-SLAM (GPU, robust to blur) |
-| Sensor-fusion / factor graph | GTSAM (iSAM2) | 4.2 | BSD-3 ✓ | Tightly-coupled GNSS+IMU+visual+baro factor graph → metric scale & georeference without Ground Control Points (GCPs); permissive so we can build our own front-end on it | Ceres Solver (BSD), g2o (BSD) |
+| Sensor-fusion / factor graph | GTSAM (iSAM2) | 4.2 | BSD-3 ✓ | One factor graph whose *required* factors are **visual + GNSS** (the mandatory inputs), folding in IMU pre-integration, baro and RTK/PPK **when those optional sensors exist** → metric scale & georeference without Ground Control Points (GCPs) against the ≤ 1 m bar; permissive so we can build our own front-end on it | Ceres Solver (BSD), g2o (BSD) |
 | Global bundle adjustment / SfM fallback | GLOMAP + COLMAP | GLOMAP 1.0 · COLMAP 3.9 | BSD ✓ | Deterministic, verifiable geometry when feed-forward confidence is low; the accuracy oracle for the report | Agisoft/Metashape (proprietary, offline reference only), hloc (matching) |
 
 > GPL-3.0 note: OpenVINS/VINS-Fusion are usable for an on-prem/internal deployment, but their copyleft affects redistribution. If DRISHTI must ship as a closed binary, the mitigation is to run the VIO as an isolated process (no linking) or replace it with a permissively-licensed estimator built directly on GTSAM. Tracked in §5 and Open questions.
+
+> **IMU-optional note:** because the official contract makes the IMU *optional*, the VIO row is the *enhanced* configuration, not the baseline. On mandatory inputs alone the front-end is **visual odometry (GLOMAP/COLMAP-class matching, or the feed-forward backbone in §(b)) scaled by GNSS baselines** — the same GTSAM graph, minus the IMU factors. That is the default path we must be correct on, not a fallback.
 
 ### (b) Feed-forward multi-view geometry (the single-pass core primitive)
 
@@ -98,7 +102,7 @@ Each table: **Role · Adopted (default build) · Version/commit · License · Wh
 |------|-------------------|---------|---------|-------------------|--------------|
 | Feed-forward geometry backbone | **Depth Anything 3 (DA3)** | Nov-2025 release | Public-data trained (confirm weight license) ✓ | Regresses camera pose + dense geometry from limited-angle video in one pass; current accuracy SOTA and licensing-friendlier than VGGT for defense | **VGGT / VGGT-Long** ⚠(commercial checkpoint excludes military use), Pi3 (CC BY 4.0 ✓), Fast3R |
 | Prior-injectable metric geometry | **MapAnything** | 3DV-2026 | CC BY 4.0 ✓ | Ingests the drone's GPS pose, IMU, intrinsics, RTK/PPK and sparse depth *as priors* and outputs **metric** geometry — the cleanest GCP-free metric route; permissive | Pow3R ⚠(NAVER, likely CC BY-NC), CUT3R (streaming, metric) |
-| Streaming / online geometry | CUT3R / StreamVGGT | 2025–26 | research (verify) | Per-frame recurrent 3D state for the near-real-time path; CUT3R virtual-view probing partially infers unseen regions | Point3R, Spann3R, VGGT-Long (batch + loop closure) |
+| Streaming / online geometry | **Persistent-state chunking on the permissive backbone** — the recurrent-state mechanism CUT3R demonstrated, implemented over DA3 / MapAnything / Pi3 rather than by shipping CUT3R | 2025–26 | inherits the backbone's permissive licence ✓ | Carries a 3D state across overlapping chunks for the near-real-time path, bounding drift and peak memory without adding a second, restricted model; virtual-view probing of unseen regions is the same trick, reimplemented | CUT3R ⚠(CC BY-NC — reference only), StreamVGGT ⚠, VGGT-Long ⚠, Point3R, Spann3R |
 
 > A *pointmap* is a per-pixel 3D-point prediction from a feed-forward network — the primitive that replaces triangulation where single-pass baselines are too short.
 
@@ -149,6 +153,7 @@ Each table: **Role · Adopted (default build) · Version/commit · License · Wh
 | Surface extraction | 2DGS / SuGaR (on gsplat) | 2024 | research → reimplement permissive | Turns the Gaussian field into a measurable, view-consistent surface | Screened Poisson (Open3D, MIT ✓), Gaussian Opacity Fields |
 | Watertight fallback mesh | Screened Poisson | — | MIT (Open3D) ✓ | Robust mesh from fused metric point cloud when 3DGS is under-constrained | Ball-pivoting, Delaunay |
 | Texturing | MVS-Texturing | 1.0 | BSD-3 ✓ | Photometric best-view texture selection with seam levelling | nvdiffrast bake (NVIDIA license) |
+| Mesh interchange (OBJ · glTF/GLB · **FBX**) | Assimp + trimesh (FBX via Blender `bpy` headless) | Assimp 5.4 · Blender 4.x | BSD-3 ✓ / MIT ✓ / GPL (out-of-process) | **.fbx is in the official required format set** and no permissive native writer is mature; Blender headless runs as an isolated CLI process so its GPL never links into DRISHTI | FBX SDK (Autodesk, proprietary), `ufbx` (MIT, reader only) |
 
 ### (i) Geospatial I/O, CRS & viewers
 
@@ -157,7 +162,8 @@ Each table: **Role · Adopted (default build) · Version/commit · License · Wh
 | Coordinate transforms | PROJ / pyproj | 9.x / 3.x | MIT / X-11 ✓ | WGS84 → UTM/EPSG, geoid (EGM2008) for orthometric height | — |
 | Raster I/O (DSM/DTM/ortho) | GDAL | 3.9 | MIT ✓ | GeoTIFF / Cloud-Optimized GeoTIFF (COG) read/write | rasterio |
 | Point-cloud processing | PDAL + LAStools/Entwine | 2.7 | BSD / mixed | LAS/LAZ pipelines, tiling | Entwine (indexing) |
-| 3D Tiles / web viewer | py3dtiles + CesiumJS | — | Apache-2.0 ✓ | Streamable OGC 3D Tiles for the digital-twin viewer | Potree (point clouds) |
+| 3D Tiles / web viewer | py3dtiles + CesiumJS | — | Apache-2.0 ✓ | Streamable OGC 3D Tiles for the digital-twin viewer — the **web-based viewer** the official spec asks for, with measurement tools and a per-region confidence overlay | Potree (point clouds) |
+| Desktop viewer | QGIS (+ CloudCompare for point-cloud QA) | QGIS 3.3x | GPL (separate application, not linked) ✓ | The official spec accepts **web-based *or* desktop**; we provide both, and every export opens in standard GIS/DCC tooling without a DRISHTI-specific reader | ArcGIS Pro (proprietary), MeshLab |
 
 ### (j) Middleware & runtime substrate
 
@@ -219,7 +225,7 @@ DRISHTI therefore ships a **permissive default backbone** and keeps the restrict
 
 **DRISHTI's own IP** — and what makes the permissive-default build defensible even though every model is off-the-shelf — is the orchestration layer: (1) prior-assisted fusion of feed-forward geometry with metric depth; (2) GNSS/IMU scale-alignment of learned depth (the metric spine); (3) confidence propagation end-to-end; (4) single-pass-specific tuning and regularization; and (5) the graceful-degradation + georeferenced-reporting layer. No single third-party model provides these for the single-pass constraint. See [Design Decisions](05-DESIGN-DECISIONS.md) ADR-01.
 
-> This section refines the canonical spec's model registry (§7), which names VGGT/MASt3R as "adopted". They remain the *reference* backbone; the *shipped defense default* is permissive. This reconciliation is logged in Open questions and should be folded back into the spec.
+> **Reconciled with the spec.** [`CANONICAL-ARCHITECTURE-SPEC.md`](_internal/CANONICAL-ARCHITECTURE-SPEC.md) §7 now carries the same permissive-shipped / restricted-reference split as the table above, so this section elaborates the registry rather than contradicting it. Restricted models are a benchmark reference we measure against; they never enter the shipped binary.
 
 ---
 
@@ -258,10 +264,12 @@ ingest (GStreamer/NVDEC) → keyframe QA (blur/exposure gating)
   → fused cloud / TSDF: Open3D   → few-shot 3DGS: gsplat (InstantSplat-style init)
   → mesh: 2DGS / screened Poisson  → texture: MVS-Texturing
   → georeference to UTM (PROJ/GDAL) → DSM/DTM + true orthomosaic
-  → export LAS/LAZ + glTF + GeoTIFF + 3D Tiles
-  → accuracy & confidence report vs COLMAP/Metashape reference (C2C/C2M)
-  → web viewer (CesiumJS / Potree)
+  → export the official required set: OBJ · PLY · LAS · GeoTIFF · glTF/GLB · FBX  (+ LAZ, 3D Tiles)
+  → accuracy & confidence report vs COLMAP/Metashape reference (C2C/C2M), flagging any region past 1 m
+  → web viewer (CesiumJS / Potree) + desktop open-in-QGIS path
 ```
+
+The whole MVP is budgeted against the official ceiling — **< 15 min end-to-end for a 10-minute video** — and runs on the mandatory inputs only, with intrinsics self-calibrated.
 
 - **Live stretch goal:** stream a clip through an edge-emulated path with a live nvblox coarse preview to demonstrate the two output paths.
 - **Robustness demo:** inject GPS noise / motion blur / a forced model failure to show the graceful-degradation ladder (L0–L6) rather than a crash.
@@ -277,7 +285,8 @@ The single-workstation hackathon config emulates the Edge/Ground split on one ma
 - **License confirmation.** Weight licenses for the newest models (Depth Anything 3, Depth Pro exact terms) must be confirmed in writing before shipping; the permissive-default table (§5) is the safe fallback if any confirmation fails.
 - **Bleeding-edge maturity.** DA3 (Nov 2025), MapAnything (3DV 2026), StreamVGGT/Pi3 (2026) are months old with little independent aerial validation — we pin versions and keep the mature GLOMAP/COLMAP + Metric3D v2 fallback.
 - **GPL in the VIO layer.** OpenVINS/VINS-Fusion copyleft; resolve via process isolation or a GTSAM-native estimator before any closed-binary distribution.
-- **Spec reconciliation.** §5 changes the *shipped* backbone from the spec's VGGT/MASt3R to permissive equivalents; fold this into [`CANONICAL-ARCHITECTURE-SPEC.md`](_internal/CANONICAL-ARCHITECTURE-SPEC.md) §7.
+- **Cost of the permissive substitution.** §5's shipped backbone (now also the spec's §7 registry) trades away some published accuracy versus the restricted VGGT/MASt3R family. *How much* is the real open question and must be measured on aerial data before we quote a number — not assumed to be negligible.
+
 - **Edge memory.** Billion-parameter models OOM on Orin; the edge runs only small quantized models — verify the INT8 accuracy-vs-latency trade on the event hardware.
 
 ## Further reading

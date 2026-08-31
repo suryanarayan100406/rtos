@@ -21,6 +21,11 @@ engineers, hackathon judges, and the DRISHTI build team wiring the pipeline toge
 - The **accurate model never depends on the live link**: near-raw H.265 plus full-rate telemetry is
   recorded to onboard Non-Volatile Memory express (NVMe) storage, and the Ground Tier reprocesses that
   recording **deterministically** (monotonic frame IDs, pinned versions, fixed seeds).
+- **The official input contract drives every interface below.** Only **video (1080p/4K) + GPS +
+  flight metadata** are *mandatory*; IMU, barometric altitude, camera intrinsics and RTK/PPK are
+  *optional*. So every message carries a **capability flag** for what was actually present, no consumer
+  may assume an IMU or RTK stream exists, and the default configuration is **self-calibrated intrinsics
+  + GNSS-baseline scale**. Optional sensors are handled as *upgrades*, never as prerequisites.
 - Integration is real-hardware-first: camera→Jetson over Camera Serial Interface (CSI) / Gigabit
   Multimedia Serial Link (GMSL) / USB; telemetry and control over **MAVLink/MAVSDK** (PX4/ArduPilot)
   or the **DJI Payload SDK (PSDK)**; Real-Time Kinematic (RTK) corrections over **NTRIP**.
@@ -147,6 +152,9 @@ uint8   gnss_fix_type             # 0 none · 1 single · 2 float · 4 RTK-fix (
 # --- Camera intrinsics (fixed or self-calibrated), S1 / S6 ---
 sensor_msgs/CameraInfo intrinsics # K, distortion model + coeffs, width/height
 bool    intrinsics_fixed          # true = pre-calibrated and locked in bundle adjustment
+                                  #   default is false: intrinsics are an OPTIONAL input, so S6 self-calibrates
+uint8   sensor_caps               # bitfield: 1 IMU · 2 baro · 4 RTK/PPK · 8 operator intrinsics
+                                  #   mandatory-only capture => 0; consumers must branch on this
 
 # --- Payloads by reference (content-addressed), never inline ---
 string image_uri                  # e.g. mcap://seg-0007#kf-000142
@@ -156,7 +164,9 @@ string dynamic_mask_uri           # movers removed from geometry (S3)
 string semantic_label_uri         # building/roof · road/infra · veg · terrain · obstacle (S3)
 string depth_uri                  # metric depth, scale-aligned to trajectory (S4)
 string depth_confidence_uri       # per-pixel confidence (S4)
-string pointmap_uri               # optional VGGT / MASt3R pointmap (S4)
+string pointmap_uri               # optional feed-forward pointmap, permissive backbone (S4)
+                                  #   Depth Anything 3 / MapAnything / Pi3
+
 float32 sharpness_score           # variance-of-Laplacian (S1)
 float32 exposure_score            # histogram-clip fraction (S1)
 ```
@@ -203,9 +213,10 @@ string  message                   # human-readable
 
 These three types carry the anchors across every boundary: `pose_map` + covariance + georeference
 fields *are* the metric spine (A2); the `depth_uri`/`pointmap_uri`/`depth_confidence_uri` triplet
-carries the prior-assisted geometry (A1) — learned depth and VGGT/MASt3R pointmaps with per-pixel
-confidence — into the fusion stages; and `pose_tier`, `ladder_level`, and every `*_confidence` field
-*are* the reliability spine (A4).
+carries the prior-assisted geometry (A1) — learned depth and permissive feed-forward pointmaps
+(Depth Anything 3 / MapAnything / Pi3) with per-pixel confidence — into the fusion stages; `sensor_caps`
++ `intrinsics_fixed` carry the **official input contract** (what was actually available on this flight);
+and `pose_tier`, `ladder_level`, and every `*_confidence` field *are* the reliability spine (A4).
 
 ---
 
@@ -341,9 +352,12 @@ MAVLink commands or PSDK — always on the **control plane** (§7), never mixed 
 Operating Reference Station (CORS) caster or a local base (Emlid Reach RS3) to the rover for cm-level
 positions. Where no correction link exists (borders, disaster sites), DRISHTI logs raw GNSS
 observations (RINEX) and post-processes with **RTKLIB PPK** after landing — the link-independent,
-reprocessable accuracy anchor. Honesty note: *"metric without GCPs"* is sensor-fused scale with
-**configuration-dependent** numbers — cm-class with RTK/PPK (ladder L0), sub-metre GPS-only (L1) — and
-vertical typically needs one checkpoint to remove a ~10–30 cm geoid/lever-arm bias.
+reprocessable accuracy anchor. **RTK/PPK is an *optional* input**, so this whole path is an accuracy
+upgrade, not a dependency: with plain GPS the system still runs, targeting the official ≤ 1 m bar.
+Honesty note: *"metric without GCPs"* is sensor-fused scale with **configuration-dependent** numbers —
+cm-class with RTK/PPK (ladder L0), **target ≤ 1 m** on the mandatory GPS-only baseline (L1, 0.5–2 m
+envelope by GPS quality, with any region past 1 m flagged) — and vertical typically needs one checkpoint
+to remove a ~10–30 cm geoid/lever-arm bias.
 
 **Power / thermal integration.** The Jetson draws through the E-Port (24 V) or airframe rail and is
 capped to a 15–25 W power mode with `nvpmodel` + `jetson_clocks`. A **thermal watchdog** reads
@@ -400,9 +414,13 @@ WS   /v1/map/updates                            -> MapUpdate deltas (seq, blocks
 GET  /v1/health                                 -> aggregated HealthStatus + active ladder level
 ```
 
-The export formats are exactly the Desired-Output deliverables (LAS/LAZ/COPC, OGC 3D Tiles, COG
-DSM/DTM/ortho, glTF/GLB, CityJSON, GeoJSON, plus the accuracy & confidence report). The live-map stream
-is the A3 *Live path* surfaced to the operator; the measurement/export APIs are the A3 *Refine path*.
+The export formats cover the **official required set — OBJ, PLY, LAS, GeoTIFF, .glb/.gltf, .fbx** — plus
+our additions (LAZ/COPC, OGC 3D Tiles, COG DSM/DTM/ortho, CityJSON, GeoJSON) and the accuracy &
+confidence report. `.fbx` is written out-of-process via headless Blender so no GPL links into DRISHTI
+(see [Technology Stack](03-TECHNOLOGY-STACK.md) §3h). Products are consumable in the **web viewer
+(CesiumJS/Potree) or a desktop viewer (QGIS/CloudCompare)** — the spec accepts either and we ship both.
+The live-map stream is the A3 *Live path* surfaced to the operator; the measurement/export APIs are the
+A3 *Refine path*, whose end-to-end budget is the official **< 15 min for a 10-minute video**.
 
 ---
 
@@ -429,9 +447,10 @@ every module boundary, not patched with try/except, and it maps onto the canonic
 
 | Boundary failure | Detection | Response | Ladder |
 |------------------|-----------|----------|--------|
-| No RTK/PPK correction | `gnss_fix_type` drops from 4 | Continue GNSS+IMU+VIO; flag reduced georef; defer to PPK | **L1** |
-| GNSS dropout (canyon/denied) | fix=0, HDOP spikes | VIO+IMU dead-reckon; re-anchor `map`→`earth` on re-acquire | **L2** |
-| Brief visual loss | VIO covariance blows up | IMU inertial propagation; short gap flagged high-uncertainty | **L3** |
+| No RTK/PPK correction (or none fitted — it is *optional*) | `gnss_fix_type` drops from 4, or `sensor_caps` bit unset | Continue on GNSS + visual (+ IMU where present); flag reduced georef; defer to PPK if RINEX was logged | **L1** |
+| No IMU fitted (mandatory-only capture) | `sensor_caps` IMU bit unset | Visual odometry scaled by GNSS baselines — the **default path, not a fallback**; widen keyframe spacing for parallax; no gravity prior, so vertical uncertainty is reported wider | **L1** |
+| GNSS dropout (canyon/denied) | fix=0, HDOP spikes | VIO+IMU dead-reckon where an IMU exists, else visual-only dead-reckon with scale held from the last GNSS baseline; re-anchor `map`→`earth` on re-acquire | **L2** |
+| Brief visual loss | VIO covariance blows up | IMU inertial propagation where present; otherwise bridge by constant-velocity GNSS extrapolation; short gap flagged high-uncertainty | **L3** |
 | Blur/dark frames | sharpness/exposure gate | Widen keyframe spacing; mark coverage holes, not garbage | **L4** |
 | Neural model OOM/fail | node error + watchdog | Fall back to classical MVS/monocular; lower LOD | **L5** |
 | Edge compute/thermal saturated | `soc_temp_c`, `queue_depth` | Point-splat preview; defer meshing to ground | **L6** |
@@ -457,11 +476,14 @@ The same modules and contracts re-tile across four topologies; only *where* the 
 | **Hackathon single-workstation** | *emulated* | one RTX/laptop | none | L0/L1 | Edge/Ground split emulated in one host on the provided dataset |
 
 In the **hackathon emulation** the edge and ground processes run on one workstation and the SRT link is
-a loopback; the pipeline is otherwise identical — video+GPS+metadata → keyframe QA → poses
-(VGGT/MASt3R or COLMAP) → metric depth scale-aligned to GPS → fused cloud/TSDF (Open3D) → few-shot 3DGS
-(InstantSplat) → mesh (2DGS/Poisson) → georeference to UTM → export + accuracy report + web viewer,
-with dynamic masking and a graceful-degradation demo (injected GPS noise/blur). This makes the "real
-hardware" and "single-workstation" stories the **same code on a different topology**, not two systems.
+a loopback; the pipeline is otherwise identical — video+GPS+metadata (the mandatory inputs only,
+intrinsics self-calibrated) → keyframe QA → poses (GLOMAP/COLMAP, or the permissive feed-forward
+backbone: Depth Anything 3 / MapAnything / Pi3) → metric depth scale-aligned to GPS → fused cloud/TSDF
+(Open3D) → few-shot 3DGS (gsplat, InstantSplat-style init) → mesh (2DGS/Poisson) → georeference to UTM →
+export the required set (OBJ · PLY · LAS · GeoTIFF · glTF/GLB · FBX) + accuracy report + web/desktop
+viewer, inside the **< 15 min / 10-min-video** budget, with dynamic masking and a graceful-degradation
+demo (injected GPS noise/blur). This makes the "real hardware" and "single-workstation" stories the
+**same code on a different topology**, not two systems.
 
 ---
 
@@ -480,11 +502,14 @@ DRISHTI is built for a defense customer, so data control is an integration requi
   operator's control by default — there is no mandatory telemetry exfiltration.
 - **Access control.** The API surface (§8) sits behind Role-Based Access Control; measurement and export
   actions are logged to the same audit trail as the chain-of-custody record.
-- **Licensing/sovereignty caveat.** Several strong research models carry non-commercial or
-  no-military licenses (e.g. VGGT's commercial checkpoint excludes military use; MASt3R weights are
-  non-commercial; Ultralytics YOLO is AGPL-3.0). A deployable build must be assembled from
-  permissively-licensed components (GTSAM BSD, RoMa MIT, SuperPoint/LightGlue Apache, DROID-SLAM BSD)
-  or licensed/retrained equivalents — tracked in [Open questions](#open-questions--risks).
+- **Licensing/sovereignty caveat.** Military reconnaissance & mission planning is an explicit official
+  application, so every non-commercial or no-military checkpoint is **reference-only and never
+  integrated** (VGGT's commercial checkpoint excludes military use; DUSt3R/MASt3R are CC BY-NC;
+  UniDepth V2 is CC BY-NC-SA; Ultralytics YOLO is AGPL-3.0). The deployable build integrates permissive
+  components exclusively — **Depth Anything 3, MapAnything, Pi3, Metric3D v2, gsplat, GLOMAP/COLMAP,
+  RT-DETR, SAM2**, plus GTSAM (BSD), RoMa (MIT), SuperPoint/LightGlue (Apache) — and any GPL tool
+  (headless Blender for `.fbx`, QGIS as the desktop viewer) runs **out-of-process, never linked**. See
+  [Technology Stack](03-TECHNOLOGY-STACK.md) §5.
 
 ---
 
@@ -497,8 +522,14 @@ DRISHTI is built for a defense customer, so data control is an integration requi
   the M350; onboard Jetson on the M350 needs a third-party PSDK carrier. Verify carrier + PSDK aircraft
   support before committing (see [`_internal/research/4-drone-sensor-hardware.md`](_internal/research/4-drone-sensor-hardware.md)).
 - **Vertical accuracy without a checkpoint.** A systematic ~10–30 cm vertical bias (geoid/lever-arm/
-  boresight) is common with zero GCPs; the honest budget for GPS-only is sub-metre, and one checkpoint
-  or a precise local geoid is effectively required for sub-decimetre vertical.
+  boresight) is common with zero GCPs; the honest budget on the mandatory GPS-only baseline is
+  **≤ 1 m against the official bar** (sub-metre in practice, flagged where it is not), and one
+  checkpoint or a precise local geoid is effectively required for sub-decimetre vertical.
+- **Lever arm with no IMU and no known mount.** The camera→antenna offset is a *measured* quantity; on a
+  mandatory-only capture from an unknown airframe it may be unavailable, leaving a fixed few-decimetre
+  translation bias. Mitigation: estimate it as a nuisance parameter in S6 where the flight geometry
+  supports it, and report it as a bias term in the accuracy report rather than absorbing it silently.
+
 - **Deterministic reprocessing vs GPU non-determinism.** Unpinned CUDA/library versions and float
   reductions can break bit-exact reproducibility; the chain-of-custody guarantee depends on locking
   these down and content-addressing inputs.

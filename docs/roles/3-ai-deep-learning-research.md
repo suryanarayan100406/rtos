@@ -30,9 +30,23 @@ the [3D Reconstruction Lead](1-3d-reconstruction-lead.md), the
 - **Honesty is built into the model layer.** "Real-time" means a **near-real-time edge preview**
   (Live path, S0–S5) plus **minutes-scale ground refinement** (Refine path, S6–S10); heavy
   transformers stay on the Ground Tier by design.
-- **Licensing and aerial domain gap are first-order risks.** The strongest checkpoints are
-  non-commercial or exclude military use; the deployable, sovereignty-friendly build is assembled
-  from permissively-licensed, locally-hosted, replaceable weights.
+- **Licensing and aerial domain gap are first-order risks — and the licensing one is now decided.**
+  Military reconnaissance is on the brief's own application list, so anything non-commercial or
+  military-excluded is **reference-only, never shipped**: VGGT's commercial checkpoint excludes military
+  use, DUSt3R/MASt3R/MASt3R-SfM are CC BY-NC, UniDepth V2 is CC BY-NC-SA, Depth Anything V2 Base/Large
+  are CC BY-NC, Ultralytics YOLO is AGPL-3.0. The shipped set is **Depth Anything 3 · MapAnything · Pi3**
+  (pointmaps), **Metric3D v2** (BSD-2, metric depth), **RT-DETR / RTMDet + SAM 2 + ByteTrack**
+  (perception), **gsplat** (splatting) — all permissive, locally hosted, and swappable (§6).
+- **The official input contract is a model-selection constraint.** Only **video (1080p/4K), GPS and
+  flight metadata** are mandatory; **camera intrinsics are optional**, which is precisely why a
+  pointmap model that *regresses intrinsics* is load-bearing rather than convenient — it seeds S6
+  self-calibration on footage with no calibration file. **IMU is optional too**, so no model in this
+  stack may assume a gravity vector or inertial scale (ADR-16 in
+  [Design Decisions](../05-DESIGN-DECISIONS.md)).
+- **The numbers this role is graded against.** Spatial accuracy **≤ 1 m** and **< 15 minutes for a
+  10-minute video** — official hard targets. On the rubric, reconstruction accuracy is **30%**,
+  completeness **20%**, processing speed **20%**: the quantization/distillation work in §4 is not an
+  optimization nicety, it is 20% of the score.
 - All external accuracy numbers here are **reported by the methods' authors**; all DRISHTI numbers
   are **design targets (to be measured)** on the event dataset.
 
@@ -95,9 +109,9 @@ distill/quantize for the edge, validate on aerial data, and calibrate its confid
 flowchart LR
   subgraph FAM["Learned model families (owned by AI/DL role)"]
     direction TB
-    MD["Metric monocular depth<br/>Metric3D v2 · UniDepthV2 · DA-V2-metric · Depth Pro"]
-    FF["Feed-forward multi-view geometry<br/>VGGT · MASt3R · CUT3R · VGGT-Long"]
-    SEG["Segmentation & tracking<br/>YOLO11-seg · SAM2 · ByteTrack · Mask2Former/OneFormer"]
+    MD["Metric monocular depth<br/>Metric3D v2 (BSD-2) · Depth Pro"]
+    FF["Feed-forward multi-view geometry<br/>Depth Anything 3 · MapAnything · Pi3"]
+    SEG["Segmentation & tracking<br/>RT-DETR/RTMDet · SAM 2 · ByteTrack · Mask2Former/OneFormer"]
     REG["3DGS regularizers + occlusion completion<br/>depth/normal/conf priors · planarity/symmetry"]
     CONF["Confidence & uncertainty estimation<br/>per-pixel/point/Gaussian + multi-view agreement"]
   end
@@ -135,49 +149,64 @@ flowchart LR
 
 ### 3.1 Metric monocular depth (the scale-anchor family)
 
-**Members:** Metric3D v2 (permissive BSD-2 license), UniDepthV2, Depth Anything V2 (DA-V2) metric
-variants, and Depth Pro for crisp edges. **Role in S4:** supply an absolute-scale, per-pixel depth
-prior for *every* keyframe — the single most important reason single-pass metric reconstruction is
-possible without Ground Control Points (GCPs), because it provides scale where a thin baseline cannot
-triangulate it.
+**Members (shipped):** **Metric3D v2** (permissive BSD-2 licence) as the scale anchor, with **Depth Pro**
+for crisp edges. **Reference-only, evaluation harness only:** UniDepth V2 (CC BY-NC-SA) and Depth
+Anything V2 Base/Large (CC BY-NC) — we benchmark against them and never ship them (§6). **Role in S4:**
+supply an absolute-scale, per-pixel depth prior for *every* keyframe — the single most important reason
+single-pass metric reconstruction is possible without Ground Control Points (GCPs), because it provides
+scale where a thin baseline cannot triangulate it, and an **independent cross-check on the GNSS-derived
+scale** that carries most of the weight on the mandatory-only capture.
 
 **How metric scale is obtained.** These models are trained to regress absolute (metric) depth
 zero-shot. Metric3D v2 maps any camera into a canonical camera space to make metric output
-camera-agnostic; UniDepthV2 predicts a metric point cloud *and* the camera intrinsics/field-of-view
-(FOV) directly from red-green-blue (RGB), covering the "intrinsics optional" input case. Depth Pro
-estimates focal length with no metadata. Reported zero-shot accuracy (by the methods' authors):
-Metric3D v2 ViT-L reaches KITTI AbsRel 0.044 / δ1 0.985; UniDepthV2 reports δ1 of ~98.9 on KITTI and
-strong ETH3D/IBims gains. **These are the authors' numbers on automotive/indoor benchmarks — not
-DRISHTI results, and not obtained on aerial imagery.**
+camera-agnostic. **Covering the "intrinsics optional" input case** is handled by models that regress the
+camera along with the geometry — the shipped pointmap family (§3.2) and Depth Pro, which estimates focal
+length with no metadata at all; that combination is what replaces the intrinsics-predicting role
+UniDepth V2 would otherwise play, without inheriting its non-commercial licence. Reported zero-shot
+accuracy (by the methods' authors): Metric3D v2 ViT-L reaches KITTI AbsRel 0.044 / δ1 0.985. **These are
+the authors' numbers on automotive/indoor benchmarks — not DRISHTI results, and not obtained on aerial
+imagery.**
 
 **Why it still must be scale-aligned to the metric spine (A2).** A per-frame metric prediction is
 biased and noisy under domain shift: aerial nadir/oblique rooftops and terrain are out-of-distribution
 for models trained mostly on ground-level/driving data, so absolute scale error is typically 5–10%
 and drifts frame-to-frame (reported behavior). DRISHTI therefore **never trusts per-frame metric
 depth as truth.** The [3D Reconstruction Lead](1-3d-reconstruction-lead.md) re-anchors it globally:
-metric depth seeds local scale, IMU pre-integration + barometer constrain inter-frame scale and
-gravity, and a 7-DoF Sim(3) (or SE(3) with RTK) alignment of the visual trajectory to the GNSS track
-fixes absolute scale and georeference. With these priors, scale drift over a straight corridor is
+metric depth seeds local scale, and a 7-DoF Sim(3) (or SE(3) with RTK) alignment of the visual trajectory
+to the GNSS track fixes absolute scale and georeference — **that GNSS alignment is the required
+mechanism**, since GPS is the only mandatory positioning input. IMU pre-integration and the barometer
+add inter-frame scale and gravity constraints *when those optional sensors are fitted*, tightening the
+solve rather than enabling it. With the full set of priors, scale drift over a straight corridor is
 reducible to ~1–2% versus ~5–15% for pure monocular VIO (externally reported) — a **design target to
-be measured** for DRISHTI. Metric depth is thus a *prior into the spine*, not a substitute for it.
+be measured** for DRISHTI, and on the no-IMU baseline the honest expectation sits between those figures,
+which is exactly why every region at risk of exceeding the official **≤ 1 m** bar is flagged. Metric
+depth is thus a *prior into the spine*, not a substitute for it — and on the mandatory-only capture it is
+also the **only independent witness against a scale/focal-length trade** in self-calibration.
 
-**Per-pixel confidence heads.** Metric3D, UniDepthV2, and MoGe-class models emit a native per-pixel
-confidence/uncertainty map at no extra network cost. This role's job is to (a) surface that head, (b)
+**Per-pixel confidence heads.** Metric3D v2, the pointmap models, and MoGe-class models emit a native
+per-pixel confidence/uncertainty map at no extra network cost. This role's job is to (a) surface that
+head, (b)
 calibrate it on aerial data, and (c) hand it to fusion so textureless façades and out-of-domain
 regions are down-weighted rather than blindly integrated.
 
 ### 3.2 Feed-forward multi-view geometry / pointmaps
 
-**Members:** VGGT (Visual Geometry Grounded Transformer) for batch keyframe chunks; MASt3R and
-CUT3R for streaming; VGGT-Long for kilometre-scale corridors. **Role in S4/S6:** regress camera
-poses *and* dense geometry directly, replacing the Structure-from-Motion (SfM) + Multi-View Stereo
-(MVS) loop with one network pass.
+**Members (shipped, all permissive):** **Depth Anything 3**, **MapAnything** and **Pi3** for batch
+keyframe chunks, with a chunk + overlap-align + loop-closure wrapper for kilometre-scale corridors.
+**Reference-only, never shipped:** VGGT (commercial checkpoint excludes military use), MASt3R /
+MASt3R-SfM / DUSt3R (CC BY-NC), CUT3R — we keep them in the benchmark harness to quantify what the
+permissive substitution costs (§6, §9). **Role in S4/S6:** regress camera **intrinsics**, poses *and*
+dense geometry directly, replacing the Structure-from-Motion (SfM) + Multi-View Stereo (MVS) loop with
+one network pass — and, because intrinsics are an *optional* input, supplying the focal-length estimate
+that seeds S6 self-calibration.
 
 **What a pointmap is.** A pointmap is a per-pixel 3D-point prediction: for each pixel the network
 outputs an (X, Y, Z) coordinate in a shared frame, so a pointmap is a dense, already-corresponded 3D
-reconstruction of the view — not a 2D depth map that still needs a pose to be lifted. VGGT emits
-intrinsics + extrinsics + depth + pointmaps + tracks in a single feed-forward pass (reported: scene
-reconstruction in under one second; ~1.2B parameters; CVPR 2025 Best Paper).
+reconstruction of the view — not a 2D depth map that still needs a pose to be lifted. Models in this
+class emit intrinsics + extrinsics + depth + pointmaps + tracks in a single feed-forward pass (reported
+by their authors: scene reconstruction in under one second at the ~1 B-parameter scale; the line was
+opened by DUSt3R/MASt3R and VGGT, which remain our reference baselines, and is continued by the
+permissively-licensed Depth Anything 3 / MapAnything / Pi3 that we actually ship).
 
 **Why feed-forward beats triangulation at single-pass baselines.** Classical triangulation error
 scales as roughly 1/baseline, and forward flight puts the epipole inside the image where parallax is
@@ -188,27 +217,30 @@ This is the core single-pass change (anchor A1). The Reconstruction role decides
 enter the global solve; this role guarantees they are well-conditioned, chunked to fit memory, and
 carry confidence.
 
-**How their confidence is used.** VGGT and MASt3R emit per-point confidence. Because feed-forward
+**How their confidence is used.** The pointmap models emit per-point confidence. Because feed-forward
 models can hallucinate plausible-but-wrong geometry in unseen/low-confidence regions — a real hazard
 for measurement — DRISHTI treats that confidence as load-bearing: low-confidence points are
 down-weighted in Truncated Signed Distance Function (TSDF) fusion and BA, and **cross-model
 disagreement** between the monocular metric depth (§3.1) and the multi-view pointmap is itself used as
 an independent occlusion/dynamic/domain-shift flag. Memory scales with view count, so long flights are
-tiled into overlapping keyframe windows (VGGT-Long-style chunk + overlap-align + loop closure); this
-is a Ground Tier workload by design (see §4).
+tiled into overlapping keyframe windows (chunk + overlap-align + loop closure); this is a Ground Tier
+workload by design (see §4) and its cost is the main claim on the **< 15 min / 10-min video** budget.
 
 ### 3.3 Segmentation & tracking
 
-**Members:** YOLO11-seg and SAM2 (Segment Anything Model 2) with ByteTrack for dynamic-object
-instance segmentation + tracking; Mask2Former / OneFormer for semantic labeling. **Role in S3:** the
-*learned* side of dynamic and semantic masking.
+**Members:** **RT-DETR / RTMDet** detection with **SAM 2** (Segment Anything Model 2, Apache-2.0) and
+ByteTrack for dynamic-object instance segmentation + tracking; Mask2Former / OneFormer for semantic
+labeling. Ultralytics YOLO11-seg is AGPL-3.0 and therefore **reference-only** — it stays in the
+benchmark harness so we can quantify the substitution cost, and never in a shipped build (§6).
+**Role in S3:** the *learned* side of dynamic and semantic masking.
 
 A mover seen once on a single pass has no redundant views to average it out, so it bakes into the map
 as a permanent "ghost" — masking is mandatory, not optional. This role supplies the learned masks; the
 [Computer Vision & Video Intelligence](2-computer-vision-video-intelligence.md) role owns the
 class-agnostic motion-residual cue (optical flow vs epipolar/rigid-flow) and the policy that fuses the
-two. YOLO11-seg runs real-time on Jetson Orin via TensorRT (reported >30 FPS at 640 px) to mask
-movable classes; SAM2 propagates temporally coherent masks; Mask2Former/OneFormer produce the five
+two. The RT-DETR/RTMDet detector class runs real-time on Jetson Orin via TensorRT (reported >30 FPS at
+640 px for comparable real-time detectors) to find movable classes; SAM 2 turns those boxes into
+instance masks and propagates them temporally; Mask2Former/OneFormer produce the five
 semantic classes the deliverable needs (building/roof, road/infrastructure, vegetation, terrain,
 obstacle). Every mask and label carries a **segment confidence**; low-confidence masks are
 conservatively dilated so the static map is never contaminated, and if the segmentation net fails the
@@ -264,7 +296,7 @@ learned stack run near-real-time on the Edge Tier (Jetson Orin), while the *heav
 the Ground Tier — consistent with the two-path honesty framing.
 
 **Quantization.** Export to ONNX (Open Neural Network Exchange, opset 17+) → build per-model TensorRT
-engines. Default **FP16** for transformers (VGGT/MASt3R need bf16/fp16); **INT8** for the ViT-Small
+engines. Default **FP16** for the pointmap transformers (they need bf16/fp16); **INT8** for the ViT-Small
 depth and segmentation nets. INT8 gives roughly 2–4× throughput over FP16 with minor accuracy loss
 (reported) — *but only with representative calibration data.* The role's rule: **calibrate INT8 on
 real aerial frames, never on COCO/automotive**, or metric depth accuracy degrades. Choose between:
@@ -281,13 +313,20 @@ op set allows. The student runs on the edge for the Live path; the teacher runs 
 Refine path.
 
 **Batching / streaming & memory budgets.** Feed-forward transformers scale VRAM with view count, so
-the role budgets keyframes into overlapping windows and uses streaming variants (CUT3R's linear-memory
-persistent state) for bounded-memory operation over a long pass. Representative vendor-reported
+the role budgets keyframes into overlapping windows with a persistent-state carry between chunks for
+bounded-memory operation over a long pass (the mechanism CUT3R demonstrated, implemented on the permissive
+backbone rather than by shipping CUT3R). Representative vendor-reported
 capacity: Jetson AGX Orin 64 GB (~248–275 sparse-INT8 TOPS, dual Deep Learning Accelerators) can host
-the ViT-S depth + segmentation nets; Orin NX 16 GB (~117 TOPS) runs a reduced subset. VGGT (~1.2B
-params) and ViT-L backbones exceed the Orin NX budget and are near-real-time at best even on AGX Orin —
-hence the deliberate **edge-server split**: lightweight nets on the drone, heavy backbone on the
+the ViT-S depth + segmentation nets; Orin NX 16 GB (~117 TOPS) runs a reduced subset. The ~1 B-parameter
+pointmap class and ViT-L backbones exceed the Orin NX budget and are near-real-time at best even on AGX
+Orin — hence the deliberate **edge-server split**: lightweight nets on the drone, heavy backbone on the
 Ground Tier over the datalink. Detailed module specs and the runtime belong to the Systems role.
+
+**The 15-minute ceiling is this role's constraint too.** The official bar is **< 15 minutes for a
+10-minute video** end to end, so every engine carries a **quality dial** — input resolution, window
+size, ViT-S-vs-ViT-L, INT8-vs-FP16 — and this role's deliverable is the *curve*, so the orchestrator can
+trade fidelity for the deadline deterministically. Processing speed is **20% of the official rubric**:
+missing the ceiling costs more marks than a modest accuracy drop from INT8.
 
 **The accuracy-vs-latency trade curve (design targets, to be measured).** The role's core artifact is
 a curve, not a point — per model, plotted so Systems can pick an operating point per tier:
@@ -296,8 +335,8 @@ a curve, not a point — per model, plotted so Systems can pick an operating poi
 |-----------|----------------|----------------------------|--------------------------------------|
 | Depth ViT-S (INT8) | 518 px, edge | ViT-S 3 ms on RTX 4090 FP16 (author-reported) | ~15–30 FPS at reduced res on AGX Orin |
 | Depth ViT-B/L | full res, ground | ViT-B 6 ms / ViT-L 12 ms on RTX 4090 FP16 | full-res on Ground Tier only |
-| YOLO11-seg (INT8) | 640 px, edge | >30 FPS on Orin (reported) | real-time movable-class masks |
-| VGGT (FP16) | keyframe chunk, ground | <1 s / scene (reported) | near-real-time on chunks, Ground Tier |
+| RT-DETR / RTMDet (INT8) | 640 px, edge | >30 FPS on Orin for the real-time detector class (reported) | real-time movable-class masks |
+| Pointmap model (FP16) | keyframe chunk, ground | <1 s / view-set at the ~1 B-param scale (reported) | near-real-time on chunks, Ground Tier |
 
 Every figure above is either **reported by the method's authors** or a **DRISHTI design target
 pending measurement** on the event hardware and dataset — never a measured DRISHTI result.
@@ -343,21 +382,27 @@ the rationale trail is in [Design Decisions](../05-DESIGN-DECISIONS.md).
 
 | Model family | Adopted | Fallback | Why | License note |
 |--------------|---------|----------|-----|--------------|
-| Metric mono depth | Metric3D v2 (ViT-S/L) | DA-V2-Small (Apache-2.0); Depth Pro for edges | Zero-shot metric + normals + intrinsics; deployable license | Metric3D **BSD-2 (deployable)**; UniDepthV2 CC-BY-NC (R&D only); Depth Pro sample license |
-| Feed-forward pointmaps | VGGT (batch chunks) | CUT3R / MASt3R (streaming); GLOMAP/COLMAP classical | Replaces SfM+MVS; stable at thin single-pass baselines | **Verify VGGT checkpoint** — commercial one excludes military use; MASt3R CC-BY-NC-SA (R&D) |
+| Metric mono depth | Metric3D v2 (ViT-S/L) | DA-V2-Small (Apache-2.0); Depth Pro for edges | Zero-shot metric + normals; deployable licence; the independent scale check | Metric3D **BSD-2 (shipped)**; UniDepth V2 CC-BY-NC-SA and DA-V2 Base/Large CC-BY-NC → **reference-only** |
+| Feed-forward pointmaps | **Depth Anything 3 / MapAnything / Pi3** (batch chunks) | GLOMAP/COLMAP classical | Replaces SfM+MVS; stable at thin single-pass baselines; **regresses intrinsics** for the optional-calibration case | **All permissive → shipped.** VGGT (military-excluded), MASt3R/DUSt3R/CUT3R (CC BY-NC) → reference-only |
 | Temporal video depth | Video Depth Anything-Small | Per-frame metric depth | Flicker-free depth for clean multi-frame fusion | Small **Apache-2.0**; Base/Large CC-BY-NC |
-| Dynamic seg + track | YOLO11-seg + SAM2 + ByteTrack | Motion-residual masking (CV role) | Real-time movable-class masks on Orin | Ultralytics YOLO **AGPL-3.0 (replace for shipping)**; SAM2 Apache-2.0 |
+| Dynamic seg + track | **RT-DETR / RTMDet + SAM 2 + ByteTrack** | Motion-residual masking (CV role) | Real-time movable-class masks on Orin, licence-clean | RT-DETR/RTMDet permissive; **SAM 2 Apache-2.0**; Ultralytics YOLO **AGPL-3.0 → reference-only** |
 | Semantic segmentation | Mask2Former / OneFormer | SegFormer | Five deliverable classes | Verify weight license per checkpoint |
 | 3DGS regularizers | Depth/normal/confidence reg + InstantSplat-style init | FSGS/DNGaussian; TSDF/MVS fused cloud | Fights single-pass sparse-view floaters | Inherits init-model license |
 | Occlusion completion | Learned + geometric (planarity/symmetry) priors | Leave as confidence-flagged holes | Plausible completion, always flagged low-confidence | — |
 | Edge inference runtime | TensorRT (INT8/FP16) | ONNX Runtime | Near-real-time on Jetson Orin | NVIDIA SDK (see Systems role) |
 
-**Key decision — licensing drives selection.** For an NTRO/defense build, the strongest checkpoints
-are disqualified: VGGT's commercial checkpoint **explicitly excludes military use**, and
-MASt3R/UniDepthV2/DA-V2 Base-Large are non-commercial. The deployable spine is therefore built on
-**Apache-2.0 (DA-V2-Small, Video-DA-Small) and BSD-2 (Metric3D v2)** weights, with non-commercial
-models confined to R&D/benchmarking, and every model kept swappable (§5). This is the single most
-important model-layer decision and is made **up front**, not retrofitted.
+**Key decision — licensing drives selection.** For an NTRO/defense build the strongest checkpoints are
+disqualified, and **military reconnaissance appearing on the brief's own application list is what makes
+this binding rather than cautious**: VGGT's commercial checkpoint **explicitly excludes military use**;
+MASt3R/DUSt3R/MASt3R-SfM are CC BY-NC; UniDepth V2 is CC BY-NC-SA; DA-V2 Base/Large are CC BY-NC;
+Ultralytics YOLO is AGPL-3.0. The deployable spine is therefore built on permissive weights throughout —
+**Depth Anything 3 / MapAnything / Pi3** (pointmaps), **Metric3D v2** BSD-2 (metric depth),
+**Apache-2.0** DA-V2-Small / Video-DA-Small (edge students), **SAM 2** Apache-2.0 with RT-DETR/RTMDet
+(perception), **gsplat** Apache-2.0 (splatting) — with every non-commercial model confined to
+R&D/benchmarking and every model kept swappable (§5). Any GPL *tool* we need (headless Blender to write
+`.fbx`) runs **out-of-process, never linked**. This is the single most important model-layer decision and
+is made **up front**, not retrofitted. Its cost — how much accuracy the permissive substitution gives up
+on aerial data — is an open question this role must **measure**, not assume (§9).
 
 ---
 
@@ -397,13 +442,18 @@ one workstation (per spec §11).
 
 **Checkpoints to stand up zero-shot (day one):**
 
-- **Poses + pointmaps:** VGGT (or MASt3R) over keyframe chunks — the feed-forward geometry backbone,
-  no COLMAP loop required. Keep GLOMAP/COLMAP wired as the classical fallback/verification baseline.
+- **Poses + pointmaps:** Depth Anything 3 / MapAnything / Pi3 over keyframe chunks — the feed-forward
+  geometry backbone, no COLMAP loop required, **intrinsics regressed rather than assumed**. Keep
+  GLOMAP/COLMAP wired as the classical fallback/verification baseline.
 - **Metric depth:** Metric3D v2 (deployable BSD-2) as the scale anchor, with DA-V2-Small as the fast
   edge student; scale-aligned to the GPS track by the Reconstruction role.
-- **Masking:** YOLO11-seg + SAM2 + ByteTrack for dynamic objects; a semantic net for the five classes.
-- **Dense/texture:** InstantSplat-style few-shot 3DGS initialized from the VGGT/MASt3R pointmaps,
-  with depth/normal/confidence regularization.
+- **Masking:** RT-DETR/RTMDet + SAM 2 + ByteTrack for dynamic objects; a semantic net for the five
+  classes.
+- **Dense/texture:** InstantSplat-style few-shot 3DGS (gsplat) initialized from those pointmaps, with
+  depth/normal/confidence regularization.
+- **Run it in the guaranteed configuration.** The event dataset is video + GPS + flight metadata — no
+  IMU, no RTK, no calibration file — so stand every checkpoint up in exactly that configuration and
+  report a stopwatch time against the **< 15 min / 10-min video** ceiling next to the accuracy table.
 
 **What to demo (the role's showcase):**
 
@@ -435,17 +485,25 @@ coarse preview and a coverage heads-up display.
 - **Hallucination.** Feed-forward geometry and generative completion can produce plausible-but-wrong
   surfaces in unseen regions — dangerous for measurement. Mitigated only by the flag-and-exclude
   discipline (§3.4); the discipline must be enforced, not optional.
-- **Licensing for defense.** Non-commercial / no-military licenses disqualify several strongest
-  checkpoints; the deployable build must stay on permissive, locally-hosted, swappable weights (§6).
-  This constrains achievable quality and must be decided up front.
+- **Licensing for defense — decided; the *cost* is what is open.** The permissive-only shipping rule is
+  settled (§6), so the live question is **how much accuracy it costs**. Benchmark the shipped stack
+  against the reference-only checkpoints (VGGT, MASt3R, UniDepth V2, YOLO11-seg) on aerial clips and
+  publish the delta; a gap large enough to threaten the ≤ 1 m bar is a finding to report, not a reason to
+  ship an undeployable weight.
+- **No IMU, no known intrinsics — the configuration we are guaranteed.** Nothing in this stack may assume
+  a gravity vector or a calibration file (ADR-16). The specific model-layer risk is that self-calibration
+  trades focal length against depth on a straight, constant-height pass; the mitigation is the pointmap
+  model's focal estimate plus Metric3D v2 as an independent scale witness, and the **unmeasured** part is
+  whether those two together hold ≤ 1 m. Test it first on the event dataset.
 - **Edge compute headroom & INT8 portability.** Heavy transformers exceed the Orin NX budget (kept on
   the Ground Tier by design); transformer attention and dynamic shapes can hit unsupported/slow
   TensorRT ops needing custom plugins, and INT8 needs representative aerial calibration data — a real
   engineering-time risk on the hackathon-to-product path.
 - **Metric drift and verification.** Per-frame metric depth is 5–10% off (reported); without careful
-  IMU+GNSS anchoring and per-keyframe scale correction (owned by the metric-spine role) drift violates
-  the metric requirement, and proving accuracy without GCPs needs an independent reference to
-  validate against.
+  GNSS anchoring and per-keyframe scale correction (owned by the metric-spine role) — tightened by IMU
+  and barometer where those optional sensors exist — drift violates the official **≤ 1 m** requirement,
+  and proving accuracy without GCPs needs an independent reference to validate against.
+
 - **Spec conformance.** This document conforms to the
   [canonical architecture spec](../_internal/CANONICAL-ARCHITECTURE-SPEC.md); it introduces no new
   stages, tiers, or model choices. All latencies and accuracies are design targets or externally

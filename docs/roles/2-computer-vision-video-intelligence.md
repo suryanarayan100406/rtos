@@ -23,8 +23,19 @@ DRISHTI build team who need one shared picture of what this role owns and hands 
   SuperPoint + LightGlue is the sparse default; RoMa/DKM dense matching is escalated only on hard,
   low-texture, artifact-heavy pairs; LoFTR is an alternative; RAFT optical flow supplies the motion cue.
 - Dynamic masking is deliberately **belt-and-suspenders** — semantic instance segmentation + tracking
-  (YOLO11-seg / SAM2 + ByteTrack) plus a class-agnostic geometric motion test — because a single
-  un-masked mover becomes a **permanent ghost** in single-pass (challenge iv — dynamic objects).
+  (**RT-DETR / RTMDet + SAM 2 + ByteTrack**, all permissively licensed) plus a class-agnostic geometric
+  motion test — because a single un-masked mover becomes a **permanent ghost** in single-pass
+  (challenge iv — dynamic objects). Ultralytics YOLO is AGPL-3.0 and therefore **reference-only, never
+  shipped** in a build whose application list includes military reconnaissance (§8).
+- **The official input contract shapes this front-end more than any other role's.** Only **video
+  (1080p/4K), GPS and flight metadata** are mandatory; **IMU is optional**, so every IMU-assisted trick
+  below (gyro blur cross-check, gyro-PSF deblur, rigid-flow prediction, IMU-implied baseline gating) has a
+  **vision-only equivalent that is the default path**, not a fallback. Camera intrinsics are optional too,
+  so undistortion and the epipolar motion test must work from a *self-calibrated* `K` (ADR-16 in
+  [Design Decisions](../05-DESIGN-DECISIONS.md)).
+- **What this role is graded on.** The official rubric puts **20% on model completeness** and **20% on
+  processing speed**; keyframe selection and the QA gate are the levers on both — too few keyframes and
+  coverage suffers, too many and the S4→S8 tail misses the **< 15 min for a 10-minute video** ceiling.
 - **Reliability spine (anchor A4):** every output carries confidence and every stage has a fallback
   (segmentation fails → motion-residual masking only; poor frames → widen keyframe spacing and flag
   gaps, ladder level **L4**). We never emit an empty keyframe set and never contaminate the static map.
@@ -61,10 +72,13 @@ front-end is disproportionately load-bearing.
 **Explicitly not owned.** **S0** capture, time-stamping, and sensor sync belong to the
 [Drone & Sensor/Hardware](4-drone-sensor-hardware-integration.md) role — we consume its synchronized
 streams and trust its clock. The learned depth priors and feed-forward multi-view models (Metric3D v2,
-UniDepth V2, VGGT, MASt3R) belong to the [AI/Deep Learning](3-ai-deep-learning-research.md) role and run
-inside **S4** onward; we do **not** run them — we supply the clean keyframes, masks, and matches they
-need. The metric spine (**S2** factor graph, Visual-Inertial Odometry) consumes our correspondences but
-is owned outside this role.
+Depth Anything 3, MapAnything, Pi3) belong to the [AI/Deep Learning](3-ai-deep-learning-research.md) role
+and run inside **S4** onward; we do **not** run them — we supply the clean keyframes, masks, and matches
+they need. The metric spine (**S2** factor graph — visual odometry over our correspondences, upgraded to
+Visual-Inertial Odometry only when an IMU is actually fitted) consumes our correspondences but is owned
+outside this role. Note the consequence of the optional-IMU contract: on the mandatory-only capture,
+**our correspondences are the *only* motion evidence S2 has**, which raises the stakes on match quality
+from "helpful" to load-bearing.
 
 **The clean handoff to 3D Reconstruction.** The contract with the
 [3D Reconstruction Lead](1-3d-reconstruction-lead.md) is strict: **we deliver clean keyframes + masks +
@@ -84,7 +98,7 @@ ingest and masking, and their products fan out to S2/S6 as well as S4.
 
 ```mermaid
 flowchart LR
-  S0["Hardware S0<br/>synced video + IMU<br/>+ timestamps + intrinsics"]
+  S0["Hardware S0<br/>synced video + GPS + metadata<br/>(IMU/baro/intrinsics optional)<br/>+ timestamps + sensor_caps"]
   subgraph CV["Computer Vision & Video Intelligence — this role (Edge)"]
     direction TB
     S1["S1 Ingest & QA<br/>decode · blur/exposure gate<br/>keyframe select"]
@@ -127,16 +141,19 @@ it must be kept out of geometry, yet the *coverage* it represents cannot simply 
 policy:
 
 - **Blur gating** — a variance-of-Laplacian (VoL) sharpness score (Pech-Pacheco focus measure)
-  **cross-checked against the IMU angular rate**: high gyro rate during the exposure window corroborates
-  motion blur and separates genuine blur from a legitimately low-texture but sharp scene (water, sand,
-  uniform rooftops), which a naive global VoL threshold would wrongly reject. Thresholds are
-  content-adaptive per window.
+  cross-checked against an **angular-rate estimate**: high rotation rate during the exposure window
+  corroborates motion blur and separates genuine blur from a legitimately low-texture but sharp scene
+  (water, sand, uniform rooftops), which a naive global VoL threshold would wrongly reject. That rate
+  comes from the IMU **when one is fitted**; on the mandatory-only capture it comes from **frame-to-frame
+  optical-flow magnitude and the frame-differenced flow field**, which is a noisier but adequate proxy —
+  the gate degrades in precision, not in existence. Thresholds are content-adaptive per window.
 - **Exposure gating** — histogram-clip fractions flag over- and under-exposed frames.
 - **Keyframe selection** (see below) prefers the sharpest, best-exposed frame in each window rather than
   emitting a marginal one.
-- **Optional restoration** — borderline (not heavily) blurred frames may be lightly restored using an
-  IMU/gyro-derived blur kernel (a Point Spread Function from angular velocity during exposure) or a
-  **NAFNet-class** learned deblur network. The policy is **reject-first, not restore-first**: heavy
+- **Optional restoration** — borderline (not heavily) blurred frames may be lightly restored using a
+  blur kernel (a Point Spread Function) derived from angular velocity during exposure — from the IMU where
+  present, otherwise estimated from optical flow — or a **NAFNet-class** learned deblur network. The
+  policy is **reject-first, not restore-first**: heavy
   learned deblur hallucinates edges and texture that create false matches and biased geometry, so
   heavily-restored frames are **never promoted to metric keyframes**. The load-bearing acceptance metric
   is downstream match-inlier count, **not** benchmark Peak Signal-to-Noise Ratio (PSNR).
@@ -147,10 +164,24 @@ policy:
 **Keyframe selection.** Multi-pass photogrammetry *removes* redundant overlapping frames; single-pass
 must *maximize* the little parallax one trajectory offers while holding a minimum overlap floor. We
 select keyframes to maximize baseline/parallax subject to a **60–80% inlier overlap** band (design
-target) and a minimum GNSS/IMU-implied translation, scored by **parallax + sharpness + coverage**. The
+target) and a minimum **GNSS-implied translation** (the mandatory positioning input; tightened with
+IMU-pre-integrated motion where an IMU exists), scored by **parallax + sharpness + coverage**. The
 parallax and overlap signals reuse the optical-flow magnitude or matcher inlier count already computed
 downstream, so scoring is effectively free. Too little baseline yields degenerate triangulation; too
 much loses overlap — this stage walks that line deliberately.
+
+**Keyframe count is a speed decision as well as an accuracy one.** The official budget is **< 15 minutes
+for a 10-minute video**, and the S4→S8 cost is roughly linear in keyframe count, so this stage owns a
+**keyframe-budget dial**: a target count derived from the clip length and the ground tier's measured
+throughput, with the overlap band held and spacing widened when the budget binds. Widening is **flagged
+as a coverage decision** in the S10 report — we trade completeness for the deadline explicitly, never
+silently.
+
+**Parallax diversity is the mitigation for having no IMU.** With no inertial scale observability
+(ADR-16), scale rests on GNSS-baseline geometry and self-calibrated focal length, which degenerate
+together on a straight, constant-height pass. So keyframe scoring additionally rewards **heading and
+altitude change** where the trajectory offers any, and the S10 report states when it offered none — this
+is the front-end's contribution to holding the **≤ 1 m** bar.
 
 ### 3.2 Feature matching & flow
 
@@ -186,8 +217,9 @@ pixel becomes a permanent ghost or streak** in the mesh and simultaneously corru
 Masking must therefore be **high-recall** and use two independent cues that cover each other's blind
 spots — a belt-and-suspenders design:
 
-- **Semantic cue — instance segmentation + tracking (YOLO11-seg / SAM2 + ByteTrack).** Per-keyframe
-  instance masks for vehicles, humans, and animals; the Segment Anything Model 2 (SAM2) propagates masks
+- **Semantic cue — instance segmentation + tracking (RT-DETR / RTMDet detector + SAM 2 + ByteTrack).**
+  Per-keyframe instance masks for vehicles, humans, and animals; the Segment Anything Model 2 (SAM 2,
+  Apache-2.0) turns detector boxes into instance masks and propagates them
   across the sequence with streaming video memory (keeping masks temporally consistent and filling
   frames the detector misses), and ByteTrack maintains identities. This catches known movable classes
   even when parked-versus-moving is ambiguous.
@@ -248,13 +280,13 @@ Choices below conform to the canonical spec's model registry (§7). "Adopted" is
 | Task | Adopted | Fallback | Why |
 |------|---------|----------|-----|
 | Video decode / ingest | NVDEC via GStreamer (`nvv4l2decoder`) / DeepStream, zero-copy to CUDA | PyAV / FFmpeg CPU decode; I-frame-only extraction on severe RF loss | Hardware H.264/H.265 decode keeps the front-end on-GPU for near-real-time on Jetson Orin; handles RTSP/RTP and GOP structure |
-| Frame QA gate | Variance-of-Laplacian blur + IMU angular-rate cross-check + histogram exposure gate | Best-available-in-window (never empty), flagged low-confidence | Near-free, deterministic; only sharp, well-exposed frames enter geometry |
-| Keyframe selection | Parallax + sharpness + coverage, 60–80% overlap band | Widen spacing and flag temporal gaps (L4) | Single-pass must harvest scarce baseline, not remove redundancy |
-| Deblur | IMU/gyro-PSF light restoration; NAFNet-class on borderline frames only, reject-first | Skip frame; rely on neighboring sharp keyframes | Physically-grounded mild restoration; avoids hallucinated texture poisoning matches |
+| Frame QA gate | Variance-of-Laplacian blur + angular-rate cross-check (IMU where fitted, **optical-flow-derived by default**) + histogram exposure gate | Best-available-in-window (never empty), flagged low-confidence | Near-free, deterministic; only sharp, well-exposed frames enter geometry — and it works on the mandatory-only capture |
+| Keyframe selection | Parallax + sharpness + coverage, 60–80% overlap band, GNSS-implied baseline gate, **keyframe budget from the < 15 min ceiling** | Widen spacing and flag temporal gaps (L4) | Single-pass must harvest scarce baseline, not remove redundancy — and must hit the official speed bar |
+| Deblur | Gyro-PSF light restoration where an IMU exists, flow-estimated PSF otherwise; NAFNet-class on borderline frames only, reject-first | Skip frame; rely on neighboring sharp keyframes | Physically-grounded mild restoration; avoids hallucinated texture poisoning matches |
 | Sparse matching | SuperPoint + LightGlue (TensorRT) | DISK / ALIKED + LightGlue | Real-time, low-VRAM, blur/compression-robust backbone for tracks and BA |
 | Dense matching (hard pairs) | RoMa / DKM, triggered on low sparse-inlier count | LoFTR / Efficient LoFTR | Detector-free dense rescues low-texture / wide-baseline / illumination-change pairs |
 | Optical flow | RAFT | SEA-RAFT / NeuFlow v2 (edge real-time); GMFlow | Motion-segmentation cue + overlap scoring |
-| Dynamic object seg + track | YOLO11-seg / SAM2 + ByteTrack | Motion-residual masking only, conservative dilation | Two independent cues give high-recall masking of known and unknown movers |
+| Dynamic object seg + track | **RT-DETR / RTMDet + SAM 2 + ByteTrack** (permissive; Ultralytics YOLO is AGPL-3.0 and reference-only) | Motion-residual masking only, conservative dilation | Two independent cues give high-recall masking of known and unknown movers, in a licence-clean build |
 | Semantic segmentation | Mask2Former / OneFormer | SegFormer / InternImage | Labels the five required output classes for the semantic-layers deliverable |
 | Edge runtime | TensorRT (INT8/FP16), CUDA, JetPack | ONNX Runtime | Near-real-time inference on Jetson Orin; NVDEC frees the GPU for models |
 
@@ -265,13 +297,20 @@ Choices below conform to the canonical spec's model registry (§7). "Adopted" is
 ### 5.1 Inputs consumed (from Hardware S0)
 
 - **Synced video frames** — decoded H.264/H.265, as NV12/RGB CUDA buffers.
-- **IMU** — angular rate (for blur cross-check and rigid-flow prediction) and pre-integrated motion.
+- **IMU (optional)** — angular rate (for blur cross-check and rigid-flow prediction) and pre-integrated
+  motion. Present only when `sensor_caps` says so; every consumer of it here has a vision-only default.
 - **Per-sample timestamps** — GPS-time on a single monotonic clock; every frame is aligned to
-  IMU/GNSS/baro by S0 (Pulse-Per-Second / Precision Time Protocol where available). We **trust and
-  propagate** these timestamps; we do not re-time.
-- **Camera intrinsics** — matrix `K` + distortion, from EXIF/XMP or S0 self-calibration; used to
-  undistort before matching and to form the epipolar geometry for the motion test.
-- **GNSS/IMU-implied translation** — the minimum-baseline gate for keyframe selection.
+  GNSS and flight metadata by S0, plus IMU/baro where fitted (Pulse-Per-Second / Precision Time Protocol
+  where available). We **trust and propagate** these timestamps; we do not re-time.
+- **Camera intrinsics** — matrix `K` + distortion. Because intrinsics are an **optional** input, the
+  default source is **S6 self-calibration seeded by the S4 pointmap model's focal estimate**, with
+  EXIF/XMP or an operator calibration used when supplied. Used to undistort before matching and to form
+  the epipolar geometry for the motion test — so early keyframes may be processed on a provisional `K`
+  and the epipolar residual threshold is loosened accordingly until the calibration settles.
+- **`sensor_caps` + `intrinsics_fixed`** — the capability flags from S0 (see
+  [Integration §2](../04-INTEGRATION.md)). We branch on them explicitly rather than probing for data.
+- **GNSS-implied translation** — the minimum-baseline gate for keyframe selection (IMU-pre-integrated
+  translation refines it when available).
 
 ### 5.2 Outputs emitted (each with a confidence signal)
 
@@ -332,7 +371,9 @@ defined in the [canonical spec §5](../_internal/CANONICAL-ARCHITECTURE-SPEC.md#
 |---------|----------|--------|----------------|
 | Corrupt / dropped frames (RF loss) | Detect and skip; I-frame-only extraction on severe loss | — | Frame gaps flagged, not garbage |
 | Blurry / blown-out window | Best-available frame, low-confidence; **widen keyframe spacing + mark gap** | **L4** | Coverage hole flagged, never empty set |
-| Sparse matcher inliers below threshold | Escalate that pair to RoMa/DKM dense; if still degenerate, mark link weak and lean on IMU/GNSS + depth prior | L5 | Reduced connectivity, honestly weighted |
+| Sparse matcher inliers below threshold | Escalate that pair to RoMa/DKM dense; if still degenerate, mark link weak and lean on GNSS + depth prior (plus IMU where fitted) | L5 | Reduced connectivity, honestly weighted |
+| No IMU fitted (mandatory-only capture) | `sensor_caps` IMU bit unset → flow-derived angular rate for the QA gate, flow-estimated PSF for deblur, GNSS-only baseline gate; parallax scoring weighted up | **L1** | The **default path, not a degraded mode**; slightly noisier gating, same guarantees |
+| Intrinsics unknown / provisional | `intrinsics_fixed = false` → undistort with the pointmap-model focal estimate, loosen the epipolar residual threshold, re-run the motion test after S6 settles `K` | **L1** | Motion masks conservative early in the pass, tightened later |
 | Segmentation model fails / OOM | **Motion-residual masking only**, conservative dilation | L5 | Static map still protected from movers |
 | Edge compute saturated | Skip dense matching, reduce resolution/rate; defer heavy work to ground | L6 | Simpler live preview; refine unaffected |
 
@@ -362,9 +403,15 @@ front-end end-to-end. Our slice of the canonical MVP (spec §11):
    parallax + sharpness + coverage.
 3. **Match** with SuperPoint + LightGlue, exporting a COLMAP-compatible model; escalate low-inlier pairs
    to RoMa.
-4. **Mask** movers with YOLO11-seg + SAM2 + ByteTrack **and** the RAFT motion-residual test; **label**
-   the five semantic classes with Mask2Former/OneFormer.
+4. **Mask** movers with RT-DETR/RTMDet + SAM 2 + ByteTrack **and** the RAFT motion-residual test;
+   **label** the five semantic classes with Mask2Former/OneFormer.
 5. **Hand off** clean keyframes + masks + correspondences to the reconstruction path (S4).
+
+**Run it in the guaranteed configuration.** The event dataset is video + GPS + flight metadata — the
+**mandatory-only** capture — so the demo path uses the flow-derived angular-rate gate, a GNSS-only
+baseline gate, and a self-calibrated `K`. Time the front-end with a stopwatch and report keyframes/second
+alongside the count, because the keyframe budget is what keeps the whole pipeline inside **< 15 minutes
+for a 10-minute video**.
 
 **Demoing dynamic-object rejection (evaluation criterion #9).** Show masked-mover overlays on keyframes;
 quantify **precision/recall of masked movers** against hand-labeled ground truth on the dataset clips;
@@ -383,14 +430,22 @@ runs near-real-time while the ground tier refines — but the front-end MVP does
 
 ## 8. Open questions / risks
 
-- **Licensing for a defense/NTRO build.** The canonical spec adopts **YOLO11-seg**, which is AGPL-3.0
-  (copyleft); several strong checkpoints elsewhere are non-commercial (MASt3R CC-BY-NC-SA; Depth
-  Anything V2 Base/Large CC-BY-NC; VGGT's commercial checkpoint excludes military use). A deployable
-  build should assemble the front-end from **permissively-licensed** components — SuperPoint/DISK/
-  LightGlue (Apache-2.0), RoMa (MIT), and Apache-2.0 detectors such as **RT-DETR / RTMDet / YOLOX** in
-  place of Ultralytics YOLO — or license/retrain equivalents. *Flagged against the spec's adopted
-  YOLO11-seg per the style guide, not a silent substitution.* Tracked in
-  [Technology Stack](../03-TECHNOLOGY-STACK.md).
+- **Licensing for a defense/NTRO build — settled, and the front-end has already switched.** Military
+  reconnaissance is on the brief's own application list, so AGPL and non-commercial components are
+  **reference-only, never shipped**: Ultralytics **YOLO11-seg is AGPL-3.0**, MASt3R/DUSt3R are CC BY-NC,
+  Depth Anything V2 Base/Large are CC BY-NC, UniDepth V2 is CC BY-NC-SA, and VGGT's commercial checkpoint
+  excludes military use. The shipped front-end is therefore **SuperPoint / DISK / ALIKED + LightGlue
+  (Apache-2.0), RoMa (MIT), RT-DETR / RTMDet detection, SAM 2 (Apache-2.0), ByteTrack, RAFT** — reconciled
+  with [spec §7](../_internal/CANONICAL-ARCHITECTURE-SPEC.md) and
+  [Technology Stack §5](../03-TECHNOLOGY-STACK.md), so this is no longer a flagged deviation. What remains
+  open is the **detection-accuracy cost** of dropping YOLO11-seg on small aerial movers — measure
+  mask precision/recall on the event dataset rather than assuming parity.
+- **Everything IMU-assisted needs a measured vision-only number.** The gyro blur cross-check, gyro-PSF
+  deblur and IMU-implied baseline gate all have flow-derived defaults (§3.1), but their precision on the
+  mandatory-only capture is **unmeasured**. The specific risk is the QA gate mis-classifying a sharp
+  low-texture frame as blurred (or the reverse) without an independent rotation signal; the test is a
+  labelled sharp/blurred set from the event clips, scored with and without an IMU stream.
+
 - **Motion-segmentation blind spots.** Objects moving **along** the epipolar/flight direction and near
   the epipole in forward flight evade the geometric test; camouflaged, small, or animal movers evade the
   semantic net. The belt-and-suspenders union shrinks but does not eliminate the residual gap —

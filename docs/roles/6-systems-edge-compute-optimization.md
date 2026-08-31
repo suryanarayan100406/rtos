@@ -16,6 +16,20 @@ engineers, hackathon judges, and the DRISHTI build team standing up the runtime.
   near-real-time coarse preview; the Ground Tier runs the **Refine path (S6–S10)** for the
   minutes-scale metric textured model. A full 4K textured mesh is **never** produced in hard real-time
   on the UAV.
+- **The official ceiling is this role's headline number: < 15 minutes end-to-end for a 10-minute video.**
+  That is the *whole* S0→S10 chain measured on the Ground Tier, not a per-stage allowance, and it is why
+  the scheduler owns **quality dials** (window size, resolution, Gaussian budget, LOD, texture resolution)
+  instead of fixed settings. Missing the ceiling is a runtime failure even when the model is beautiful;
+  the correct response is to turn a dial down and **name the dial** in the accuracy report.
+- **On the official rubric, processing speed is 20% and scalability 10% — 30% of the marks land squarely
+  on this role**, with part of the 30% accuracy weighting resting on whether quantization and scheduling
+  preserved fidelity while buying that speed. Criterion mapping in §9.
+- **The mandatory input contract shapes the runtime too.** Only **video (1080p/4K), GPS and flight
+  metadata** are guaranteed; **IMU, barometer, RTK/PPK and camera intrinsics are optional**, so every node
+  is provisioned to start and run with those streams *absent*. The `sensor_caps` bitfield from S0
+  ([Integration §2](../04-INTEGRATION.md)) is what the supervisor branches on — a missing IMU is a
+  **configuration, not a fault**, and must never trip a watchdog (ADR-16 in
+  [Design Decisions](../05-DESIGN-DECISIONS.md)).
 - The engine is **ROS 2 + Isaac ROS** as the node graph and **DeepStream/GStreamer** as the video
   pipeline (NVDEC → inference → fusion), with **zero-copy** GPU handoff on the Jetson.
 - Learned models are made to fit the power/thermal/memory envelope via **TensorRT INT8/FP16**, layer
@@ -98,8 +112,10 @@ Its two products are the live coarse map for the operator and the compact keyfra
 **Ground Tier (RTX-class workstation or rugged field server).** Runs the **Refine path S6–S10**: global
 bundle adjustment with GNSS factors (S6), dense reconstruction and few-shot 3D Gaussian Splatting (3DGS)
 (S7), meshing and texturing (S8), georeferencing and semantics (S9), and export/serve (S10). It runs
-the heavy feed-forward geometry transformers (VGGT / MASt3R) that do not fit the edge latency budget,
-and it reprocesses the recorded stream deterministically.
+the heavy feed-forward pointmap transformers (**Depth Anything 3 / MapAnything / Pi3** — the permissively
+licensed family the model registry adopts) that do not fit the edge latency budget, and it reprocesses the
+recorded stream deterministically. It is also the tier the **< 15 min / 10-minute-video** bar is measured
+against, because it is where the graded deliverable is actually produced.
 
 **Cloud Tier (optional).** Large-area tiling, batch re-processing, and 3D Tiles / digital-twin serving.
 Omitted entirely for air-gapped missions.
@@ -121,9 +137,9 @@ flowchart TB
   subgraph GND["Ground Tier — RTX workstation / rugged field server"]
     direction TB
     RECON["Reconciler + deterministic reprocess"]
-    HEAVY["VGGT/MASt3R · global BA (S6) · 3DGS (S7)"]
+    HEAVY["Pointmaps DA3/MapAnything/Pi3 · global BA<br/>+ self-calibration (S6) · 3DGS (S7)"]
     MESH["Meshing/texture (S8) · georef (S9) · export (S10)"]
-    SRV["APIs + web viewer"]
+    SRV["APIs + exports OBJ/PLY/LAS/GeoTIFF/glTF/FBX<br/>web viewer + desktop viewer"]
   end
   subgraph CLD["Cloud Tier — optional, air-gap-omittable"]
     TILE["Scale-out tiling / 3D Tiles serving"]
@@ -147,12 +163,22 @@ split: the edge must keep pace with capture at low fidelity; the ground earns ac
 |-------------|--------|---------------|---------------|----------------|
 | Edge · AGX Orin 64 GB | S0–S5 (Live) | 15–25 W in-flight cap | NVDEC decode; VIO 30–60 Hz; seg on DLA; depth ViT-S INT8 ~15–30 FPS reduced res; nvblox TSDF >30 Hz @ 5–10 cm voxels | Glass-to-glass live preview ~1–3 s/keyframe |
 | Edge · Orin NX 16 GB | S0–S5 (Live) | 10–20 W | Same, ~⅓–½ throughput; wider keyframe spacing | Coarser preview; recording unaffected |
-| Ground · RTX workstation | S6–S10 (Refine) | wall power | VGGT/MASt3R chunks; GNSS-constrained global BA; 3DGS; meshing/texturing | Minutes after landing (or mid-flight head-start) |
+| Ground · RTX workstation | S6–S10 (Refine) | wall power | Pointmap chunks (DA3 / MapAnything / Pi3); GNSS-constrained global BA with self-calibrated intrinsics; 3DGS; meshing/texturing; export of the full official format set | **< 15 min end-to-end for a 10-min clip** (official bar), from landing or from a mid-flight head-start |
 | Cloud · GPU node | tiling / serving | elastic | Batch reprocess, 3D-Tiles LOD | Non-blocking; no mission dependency |
 
 The invariant behind the table: the edge exists to give the pilot in-flight coverage feedback and a
 situational-awareness map; the **accurate deliverable is produced on the ground from the recording**,
 never from whatever the edge managed under pressure.
+
+**How the 15 minutes get spent (working allocation, to be measured).** For a 10-minute clip on one
+RTX-class GPU: ingest + keyframe QA ~1 min · S4 pointmaps and metric depth over the keyframe set ~2–4 min ·
+S6 global solve with self-calibration ~2–3 min · S7 3DGS ~3–5 min · S8 meshing + texturing ~2–3 min ·
+S9 georeferencing + S10 export of all six required formats ~1–2 min. At the top of every range that sums
+to *more* than 15 minutes, which is precisely the point: the scheduler is a **deadline scheduler**, not a
+queue. It compares elapsed against budget after every stage and turns the next stage's quality dial down
+when the projection overruns, recording which dials moved. The other lever is a **mid-flight head-start** —
+refining the earliest keyframes while the aircraft is still airborne — which is why the store-and-forward
+uplink (§5) is a speed mechanism as much as a resilience one.
 
 ---
 
@@ -217,28 +243,38 @@ stages. Unsupported layers fall back to the GPU, so DLA op-coverage is validated
 
 **Memory management.** On the shared-memory System-on-Chip, NITROS zero-copy avoids multi-GB/s of
 redundant host↔device copies; models are sized to co-reside (a ViT-S depth net, a seg net, cuVSLAM, and
-nvblox must fit alongside decode buffers within 16 GB on Orin NX). Heavy transformers (VGGT ~1.2 B
-params; MASt3R ViT-L) **do not fit the edge latency/VRAM budget** and are deferred to ground or run on
-keyframe chunks — long flights are tiled into overlapping windows to bound peak memory.
+nvblox must fit alongside decode buffers within 16 GB on Orin NX). The heavy pointmap transformers — the
+~1 B-parameter class (Depth Anything 3 / MapAnything / Pi3) — **do not fit the edge latency/VRAM budget**
+and are deferred to ground or run on keyframe chunks; long flights are tiled into overlapping windows to
+bound peak memory.
 
 **Model scheduling — per keyframe vs deferred.** A scheduler assigns each model a cadence so the edge
 keeps pace with capture:
 
 | Runs per keyframe (Edge, Live) | Runs deferred (Ground, Refine) |
 |--------------------------------|--------------------------------|
-| cuVSLAM VIO (frame rate) · blur/exposure QA · light seg on DLA · **metric depth ViT-S INT8 (reduced res)** · nvblox TSDF integration | **VGGT/MASt3R full pointmaps** · global bundle adjustment (BA) with GNSS factors · learned Multi-View Stereo (MVS) where baseline allows · 3DGS · meshing/texturing |
+| Visual odometry at frame rate (cuVSLAM; **VIO only when an IMU is fitted**) · blur/exposure QA · light seg on DLA · **metric depth ViT-S INT8 (reduced res)** · nvblox TSDF integration | **Full pointmaps** (Depth Anything 3 / MapAnything / Pi3) · global bundle adjustment (BA) with GNSS factors and **self-calibrated intrinsics** · learned Multi-View Stereo (MVS) where baseline allows · 3DGS · meshing/texturing · export of OBJ · PLY · LAS · GeoTIFF · glTF/GLB · FBX |
 
 **Accuracy-vs-latency trade curve (design targets, to be measured).** The same geometry problem is
 solved twice at two points on the curve; the edge trusts nothing it cannot re-derive.
 
 | Operating point | Model / precision | Resolution | Latency target | Accuracy posture |
 |-----------------|-------------------|-----------|----------------|------------------|
-| Edge fast | Metric3D-S / DA-V2 ViT-S, INT8 | reduced | ~15–30 FPS (AGX); ~⅓ on NX | Coarse metric depth; confidence-gated into TSDF |
+| Edge fast | Metric3D v2 small (BSD-2), INT8 | reduced | ~15–30 FPS (AGX); ~⅓ on NX | Coarse metric depth; confidence-gated into TSDF |
 | Edge fallback (L5) | monocular-only, lower LOD | reduced | degrades gracefully | Reduced fidelity, still valid + flagged |
-| Ground full | VGGT/MASt3R + INT8→FP16 depth + MVS | full res | seconds/chunk, minutes/mission | Best fidelity; feeds accuracy report |
+| Ground full | Permissive pointmaps (DA3 / MapAnything / Pi3) + FP16 depth + MVS | full res | seconds/chunk; whole mission inside the **< 15 min** bar | Best fidelity; feeds accuracy report |
+| Ground, deadline-pressed | Same models, dialled: smaller windows, fewer Gaussians, coarser LOD and texture | reduced | fits < 15 min by construction | Lower fidelity — **and the dials that moved are named in the report** |
 
 Precision is dialed per stage against the accuracy envelopes the AI role publishes; this role does not
-choose model *architecture*, only its *runtime realization*.
+choose model *architecture*, only its *runtime realization*. One licensing constraint does cross that
+line, though: **every model this role builds an engine for must be permissively licensed**, because
+military reconnaissance appears on the brief's own application list. The runtime therefore compiles only
+the shipped set (Metric3D v2 BSD-2; Depth Anything 3 / MapAnything / Pi3; RT-DETR / RTMDet; SAM 2 and
+gsplat, Apache-2.0). The non-commercial and copyleft alternatives — VGGT's commercial checkpoint (excludes
+military use), DUSt3R/MASt3R (CC BY-NC), UniDepth V2, Depth Anything V2 Base/Large, Ultralytics YOLO
+(AGPL-3.0) — exist only in the benchmarking harness, and the GPL tools we genuinely need (headless Blender
+for `.fbx`, QGIS as the desktop viewer) are launched as **out-of-process subprocesses, never linked**
+(ADR-17).
 
 ---
 
@@ -309,9 +345,9 @@ and **resumes idempotently** from its last checkpoint using the recorded stream.
 | Level | Trigger | Runtime mechanism | Product impact |
 |-------|---------|-------------------|----------------|
 | **L0** | All sensors nominal, RTK fixed | Full path; confidence gating admits all inputs | Best accuracy (cm-class) |
-| **L1** | No RTK/PPK (`gnss_fix_type` < 4) | Continue GNSS+IMU+VIO scale; defer to Post-Processed Kinematic (PPK); flag reduced georef | Sub-metre absolute, strong relative |
-| **L2** | GNSS dropout (canyon/denied) | Health monitor sees fix=0 / HDOP spike → VIO+IMU dead-reckon; re-anchor `map`→`earth` on re-acquire | Local metric map; georef on re-acquire |
-| **L3** | Brief visual loss | VIO covariance blows up → IMU inertial propagation for the gap | Short gap flagged high-uncertainty |
+| **L1** | No RTK/PPK (`gnss_fix_type` < 4) **or no IMU/baro fitted** (`sensor_caps` bits unset) — i.e. the mandatory-only capture | Continue on GNSS baselines + visual scale, instantiating IMU/baro/RTK factors only where those sensors exist; defer to Post-Processed Kinematic (PPK) if raw observables were logged; flag reduced georef | Sub-metre absolute, strong relative — **target ≤ 1 m, with any region above it flagged**. The **default configuration, not a degraded mode** |
+| **L2** | GNSS dropout (canyon/denied) | Health monitor sees fix=0 / HDOP spike → dead-reckon on VIO+IMU where an IMU exists, otherwise on **visual odometry plus the metric-depth scale prior** (faster drift, no gravity anchor, visibly wider envelope); re-anchor `map`→`earth` on re-acquire | Local metric map; georef on re-acquire |
+| **L3** | Brief visual loss | Pose covariance blows up → IMU inertial propagation across the gap where an IMU exists; with no IMU the span is bridged by GNSS interpolation and **flagged as unreconstructed** rather than invented | Short gap flagged high-uncertainty |
 | **L4** | Bad frames (blur/dark) | S1 sharpness/exposure gate → widen keyframe spacing; mark temporal gaps | Coverage holes flagged, not garbage |
 | **L5** | Neural model Out-Of-Memory (OOM)/fail | Watchdog catches node error → fall back to classical MVS / monocular depth; lower Level-of-Detail (LOD) | Reduced fidelity, still valid + flagged |
 | **L6** | Edge compute/thermal saturated | Thermal watchdog reads `tegrastats` throttle → point-splat preview; defer meshing to ground | Live preview simpler; refine unaffected |
@@ -415,8 +451,11 @@ emulation is the shared reference in [Integration §10](../04-INTEGRATION.md) an
 ## 9. Observability & ops
 
 You cannot manage graceful degradation without measuring health, and you cannot *prove* reliability to
-an evaluator without evidence. This role instruments every stage and maps the telemetry directly onto
-the NTRO evaluation criteria (see [`../_internal/PROBLEM_STATEMENT.md`](../_internal/PROBLEM_STATEMENT.md) §3).
+an evaluator without evidence. This role instruments every stage and maps the telemetry directly onto the
+**official weighted evaluation criteria** — reconstruction accuracy 30%, model completeness 20%,
+**processing speed 20%**, innovation 15%, **scalability 10%**, user interface 5%, quoted verbatim in
+[`../_internal/PROBLEM_STATEMENT.md`](../_internal/PROBLEM_STATEMENT.md) §1a — and onto the authored
+criteria that expand them (§3 there). The two rubric lines this role is graded on directly total **30%**.
 
 **What is instrumented.**
 - **Edge health:** `tegrastats`/`jtop` for GPU/DLA utilization, VRAM, System-on-Chip power and
@@ -430,12 +469,14 @@ the NTRO evaluation criteria (see [`../_internal/PROBLEM_STATEMENT.md`](../_inte
 
 **Proving the criteria to NTRO.**
 
-| Evaluation criterion | Evidence this role produces |
-|----------------------|-----------------------------|
-| **#7 Processing latency** | Per-keyframe live-preview latency histogram (edge); time-to-final-model per minute of video (ground) |
-| **#8 Robustness** | The degradation-curve harness of §10 — monotonic quality vs injected blur / illumination / GPS noise / dynamic density; **no hard failure** |
-| **#11 Real-world deployability** | Runs demonstrated on Jetson Orin + ground GPU; power/thermal telemetry within the 15–25 W in-flight cap; DJI/PX4 integration |
-| **#12 Reliability / availability** | Recovery logs from tracking/link/sensor-dropout injection; % of missions yielding a usable model; the documented L0–L6 ladder with recorded transitions |
+| Criterion (official weight) | Evidence this role produces |
+|-----------------------------|-----------------------------|
+| **Processing speed — 20%** | Wall-clock end-to-end on a 10-minute clip against the **< 15 min** bar, with the per-stage breakdown and a record of which quality dials moved; plus the per-keyframe live-preview latency histogram (edge) |
+| **Scalability — 10%** | The same code re-provisioned across every deployment config (§8), Cloud Tier tiling for large areas, and measured throughput as clip length and area grow — the claim being that scale moves *where the tier boundary sits*, not what the software is |
+| **Reconstruction accuracy — 30%, jointly held** | Quantization-accuracy deltas (INT8 vs FP16 vs FP32) on aerial data, so speed bought at the edge is *priced* in accuracy rather than hidden; confidence gating and the ladder-level stamp on every product |
+| **#8 Robustness** (authored criterion) | The degradation-curve harness of §10 — monotonic quality vs injected blur / illumination / GPS noise / dynamic density / **absent IMU**; **no hard failure** |
+| **#11 Real-world deployability** (authored) | Runs demonstrated on Jetson Orin + ground GPU; power/thermal telemetry within the 15–25 W in-flight cap; DJI/PX4 integration |
+| **#12 Reliability / availability** (authored) | Recovery logs from tracking/link/sensor-dropout injection; % of missions yielding a usable model; the documented L0–L6 ladder with recorded transitions |
 
 The observability layer is what turns "we degrade gracefully" into a **replayable, quantified
 demonstration** — the recorded stream plus the health telemetry lets any claimed transition be re-run
@@ -449,17 +490,23 @@ This role's concrete deliverables for the event, on the provided dataset:
 
 1. **Stand up the emulated two-tier pipeline on one workstation.** Edge and Ground as separate
    processes over a loopback SRT link (§8), running the ROS 2 + DeepStream node graph: video + GPS +
-   metadata → keyframe QA → poses (VGGT/MASt3R or COLMAP) → metric depth scale-aligned to GPS → fused
-   cloud/TSDF (Open3D on ground; nvblox if a Jetson is on hand) → few-shot 3DGS (InstantSplat) → mesh
-   (2DGS/Poisson) → georeference to Universal Transverse Mercator → export + accuracy report + web
-   viewer.
-2. **Demo the two output paths.** Show the **live coarse preview** appearing at near-real-time cadence
-   during playback, then the **minutes-scale refined** metric textured model — making the honest
-   "real-time" story concrete and visible.
-3. **Demo graceful degradation.** Inject **GPS noise**, **motion blur**, and a **model failure/OOM**
-   into the stream and show the ladder respond: L1/L2 on GPS corruption, L4 on blur, L5 on model
-   failure — each producing a still-valid, confidence-flagged output rather than a crash, with the
-   active ladder level and confidence overlay visible in the viewer.
+   metadata — **and nothing else: no IMU, no RTK, no calibration file** — → keyframe QA → poses
+   (permissive pointmaps, or GLOMAP/COLMAP as the fallback baseline, with intrinsics **self-calibrated**)
+   → metric depth scale-aligned to GPS → fused cloud/TSDF (Open3D on ground; nvblox if a Jetson is on
+   hand) → few-shot 3DGS (InstantSplat-style init + gsplat) → mesh (2DGS/Poisson) → georeference to
+   Universal Transverse Mercator → **export of all six official formats (OBJ · PLY · LAS · GeoTIFF ·
+   glTF/GLB · `.fbx`)** + accuracy report + **both the web viewer and the desktop viewer**.
+2. **Demo the two output paths — with a stopwatch on the second one.** Show the **live coarse preview**
+   appearing at near-real-time cadence during playback, then the **minutes-scale refined** metric textured
+   model, making the honest "real-time" story concrete and visible. Run the refine path on a 10-minute clip
+   with a visible timer and the per-stage breakdown on screen, so **< 15 min** is a demonstrated number
+   rather than an assertion — and if a quality dial had to move to get there, say which one.
+3. **Demo graceful degradation.** Inject **GPS noise**, **motion blur**, a **model failure/OOM**, and —
+   the case the official input contract makes mandatory to handle — a capture with the **IMU, barometer
+   and RTK streams simply absent** (`sensor_caps = 0`). Show the ladder respond: **L1 on the sensor-less
+   capture with no watchdog firing at all**, L1/L2 on GPS corruption, L4 on blur, L5 on model failure —
+   each producing a still-valid, confidence-flagged output rather than a crash, with the active ladder
+   level and confidence overlay visible in the viewer.
 4. **Show the telemetry** (§9): latency and health dashboards, and a re-run of the recording proving
    deterministic reprocess (§7).
 
@@ -476,15 +523,29 @@ single third-party model.
 - **Thermal throttling is silent.** On a sealed, power-constrained UAV, sustained load cuts Jetson
   clocks without an explicit error; if the thermal watchdog is mis-tuned, live capability degrades
   before L6 fires. Must be validated on the real airframe enclosure, not on a bench.
-- **On-Orin performance of 2024–2025 research models is unproven.** VGGT, MASt3R-SLAM, and metric-depth
-  nets are benchmarked on RTX-4090-class GPUs; their real edge throughput and INT8 accuracy on aerial
-  data are hackathon-to-product risks. The heavy transformers almost certainly stay on the ground tier,
-  adding a network dependency for highest fidelity.
+- **On-Orin performance of 2024–2025 research models is unproven.** The permissive pointmap family
+  (Depth Anything 3, MapAnything, Pi3) and the metric-depth nets are benchmarked on RTX-4090-class GPUs —
+  *as reported by their authors*; their real edge throughput and INT8 accuracy on aerial data are
+  hackathon-to-product risks. The heavy transformers almost certainly stay on the ground tier, adding a
+  network dependency for highest fidelity.
+- **Whether the whole chain fits < 15 minutes on one GPU is the open question of this role.** The
+  allocation in §2 exceeds 15 minutes at the top of every range, which is why the deadline scheduler and
+  its quality dials exist — but the dials' *accuracy cost* is unmeasured, and so is the point at which a
+  mid-flight head-start stops being an optimization and becomes a requirement. First measurements to take
+  on the provided dataset: full-fidelity wall-clock on a 10-minute clip, then the same clip with each dial
+  at its low setting, with the accuracy delta recorded for both.
 - **Deterministic reprocess vs GPU non-determinism.** Unpinned CUDA/library versions and floating-point
   reduction order can break bit-exact reproducibility; the chain-of-custody guarantee depends on locking
   versions and content-addressing inputs, which must be enforced in CI, not by convention.
 - **Ladder flapping.** Without well-chosen hysteresis and dwell times, the supervisor can oscillate
   between levels under marginal conditions; thresholds need empirical tuning on real degraded data.
+- **A sensor that was never fitted must not look like a sensor that died.** The supervisor infers health
+  from stream liveliness, so an optional stream absent by configuration (`sensor_caps` bit unset) and one
+  that failed mid-flight can look identical to a naive monitor — yet the first is nominal L1 and the second
+  is a genuine fault. The mechanism is to gate every liveliness and deadline check on the capability flag
+  at startup, but this is exactly the kind of thing that regresses quietly, so it needs a CI test that
+  boots the whole graph with `sensor_caps = 0` and asserts **zero** watchdog transitions.
+
 - **INT8 calibration data.** Quantized depth accuracy hinges on a representative aerial calibration set;
   a poor set silently biases the metric model — an accuracy risk owned jointly with
   [AI/Deep Learning](3-ai-deep-learning-research.md).
