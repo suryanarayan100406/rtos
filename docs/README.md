@@ -64,6 +64,22 @@ and has a fallback, so the system **degrades gracefully and never hard-fails**.
 | [5 · Geospatial & Accuracy Research](roles/5-geospatial-accuracy-research.md) | Metric spine, GNSS/RTK factors (S6), S9 georeferencing/DSM/ortho, accuracy validation, formats |
 | [6 · Systems & Edge / Compute Optimization](roles/6-systems-edge-compute-optimization.md) | Runtime: tiering, ROS 2, TensorRT, streaming, reliability spine, deployment |
 
+### Implementation (build docs)
+
+> The **build** we are actually shipping: recorded footage + telemetry → one full-quality georeferenced
+> 3D model, **offline and ground-only** (no drone/edge deployment, no live path), on modest + free
+> compute. This is a ground-only realization of the canonical architecture — see the scope delta in
+> [`../AGENTS.md` §2](../AGENTS.md).
+
+| Doc | What it covers |
+|-----|----------------|
+| [`GUIDE.md`](GUIDE.md) | **Complete usage + how-it-works guide for the shipped build (start here to *use* it):** install, prepare inputs, run/resume, local↔T4 tiering, outputs, serve/view, and every pipeline stage in detail — code-accurate. |
+| [`../AGENTS.md`](../AGENTS.md) | **Living context for AI agents (read first):** scope, constraints, principles, status, decision log |
+| [implementation/00 · PRD](implementation/00-PRD.md) | Product requirements: requirements, outputs, success metrics, acceptance criteria |
+| [implementation/01 · Implementation Plan](implementation/01-IMPLEMENTATION-PLAN.md) | All seven phases (0–6): goals, tasks, local/cloud compute, exit criteria |
+| [implementation/02 · System Design](implementation/02-SYSTEM-DESIGN.md) | Code architecture: project-bundle model, stage interface, config, compute tiering, model registry |
+| [implementation/README](implementation/README.md) | Index + reading paths for the build docs |
+
 ### Reference (internal)
 
 | File | Purpose |

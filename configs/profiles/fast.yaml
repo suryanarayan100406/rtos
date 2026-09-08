@@ -1,0 +1,24 @@
+# Speed-biased profile — fewer frames, faster/cheaper stages. Overrides default.yaml.
+ingest:
+  target_fps: 2
+frameqa:
+  keyframe:
+    method: fixed_stride
+    stride: 8
+poses:
+  use_glomap: false
+  matcher: sequential
+depth:
+  model: depth_anything_v2_small
+  input_long_side: 700
+  feedforward_geometry:
+    enabled: false
+dense:
+  method: tsdf
+  tsdf_voxel_m: 0.10
+mesh:
+  method: poisson
+  poisson_depth: 9
+geo:
+  dsm_res_m: 0.25
+  ortho_res_m: 0.10
