@@ -72,7 +72,11 @@ def run_colmap_sfm(
 
     poses: list[CameraPose] = []
     for _img_id, image in rec.images.items():
+        # pycolmap's rig refactor turned Image.cam_from_world into a *method*; older
+        # versions expose it as a property. Call it when callable so both yield a Rigid3d.
         cfw = image.cam_from_world
+        if callable(cfw):
+            cfw = cfw()
         R = np.asarray(cfw.rotation.matrix(), dtype=float)
         t = np.asarray(cfw.translation, dtype=float).reshape(3)
         center = (-R.T @ t)

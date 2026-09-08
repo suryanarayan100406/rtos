@@ -307,10 +307,11 @@ Per-phase done vs. remaining:
 
 **Now / Next:** Infrastructure and all stage code are in place and unit-green, and **realistic inputs now
 exist on demand** via `scripts/make_sample_dataset.py` (real OpenDroneMap imagery + real GPS EXIF, or a
-ground-truth synthetic city) — both are **proven on the cloud T4 through S1 frame-QA** (S0 ingest with the
-CRS derived from the real track, not hardcoded; S1 green), and the first `s2_poses` break that run hit — a
-pycolmap `image_list`→`image_names` API rename — is now fixed (§9), so the next run exercises real SfM
-matching + incremental mapping on the T4. The next high-value action is a **real end-to-end run on the cloud-T4 tier** — the
+ground-truth synthetic city) — both are **proven on the cloud T4 through S2 SfM** (S0 ingest with the CRS
+derived from the real track, not hardcoded; S1 frame-QA; S2 COLMAP registered **17/18** brighton_beach
+frames to a kept reconstruction). Two pycolmap-4.3 API drifts surfaced there and are now fixed (§9:
+`image_list`→`image_names`, and `Image.cam_from_world` now a method), so the next run pushes S2's recovered
+poses on into S3 masking and the neural/dense stages. The next high-value action is a **real end-to-end run on the cloud-T4 tier** — the
 no-local-deps path is now `notebooks/drishti_colab_full.ipynb`, which runs **all 11 stages** on the T4
 (import → run → export + logs) so the finished bundle only needs to be *viewed* locally; the tier-split
 `notebooks/drishti_cloud_t4.ipynb` (or `docker/cloud.Dockerfile`) remains for keeping the CPU stages
@@ -329,6 +330,20 @@ list of what's done vs. remaining directly under this table.
 
 Record every decision that a future agent would otherwise have to reverse-engineer. Newest at the top.
 
+- **2026-09-09 — `s2_poses` second pycolmap drift fixed (`Image.cam_from_world` is now a *method*).**
+  With the `image_names` fix in, a real Colab run drove S2 through **full SfM** — SIFT on all 18
+  brighton_beach frames, sequential matching, incremental mapping **registered 17/18 images**, reconstruction
+  kept — then failed while extracting poses: `AttributeError: 'builtin_function_or_method' object has no
+  attribute 'rotation'` at `cfw.rotation.matrix()`. **Root cause:** the installed pycolmap is the
+  **rig/frame-based** build (COLMAP **4.3.0.dev0**; the log shows "Loading rigs…", `num_reg_frames=…`), in
+  which `Image.cam_from_world` changed from a pose **property** to a **method** `cam_from_world() -> Rigid3d`.
+  The code read it as an attribute, so `cfw` was the bound method (hence `.rotation` missing). **Fix
+  (`src/drishti/recon/sfm.py`):** `cfw = image.cam_from_world; if callable(cfw): cfw = cfw()` — calls it on
+  the new pycolmap, uses the property on the old. **Verified the rest of the extraction against the same
+  4.3.0.dev0 API docs** so S2 won't hit a third wall: `Rigid3d.rotation` (Rotation3d) + `.translation` are
+  properties, `Rotation3d.matrix()` → 3×3, `Image.name`, `Camera.model/width/height/params`, `Point3D.xyz`,
+  and `Reconstruction.num_reg_images()` are all current. No metrics/behavior change — real SfM, same
+  fail-loud contract. Next: re-run / `drishti resume` to push S2 into S3 (masking). *(Agent.)*
 - **2026-09-09 — `s2_poses` pycolmap API drift fixed (`image_list` → `image_names`).** The first real
   Colab run past install reached `s2_poses` and failed loudly: `extract_features(): incompatible function
   arguments … Invoked with: … image_list=[…], camera_mode=CameraMode.AUTO`. **Root cause:** `pyproject`
@@ -343,8 +358,9 @@ Record every decision that a future agent would otherwise have to reverse-engine
   (first positional `database_path`) and `incremental_mapping(database_path, image_dir, output_path)` (three
   positionals) match our calls exactly; the `cam_from_world` / `points3D` / `cameras` reconstruction access
   is the current API the installed pycolmap exposes. No behavior/metrics change — same real SfM, same
-  fail-loud contract. Next: re-run (or `drishti resume runs/colab-full-20260908-205447`) to push S2 through
-  matching + incremental mapping on the T4. *(Agent.)*
+  fail-loud contract. **Confirmed working:** the follow-up run ran feature extraction + sequential matching
+  + incremental mapping to a kept reconstruction (17/18 images); the next break was a *separate* drift
+  (see the entry above). *(Agent.)*
 - **2026-09-09 — Cloud-notebook install made resilient; Open3D↔Python-3.13 blocker resolved with a
   uv-built 3.12 env.** A real Colab run of `drishti_colab_full.ipynb` failed: `pip install -e ".[…,recon,…]"`
   aborted with `Could not find a version that satisfies the requirement open3d>=0.18 … (from versions:
