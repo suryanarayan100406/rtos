@@ -9,7 +9,7 @@ pointers into `docs/`.
 **Audience:** AI coding agents (Claude Code and others) and human contributors. This is an operational
 context file, not a pitch — for the evaluator-facing story see [`docs/00-MASTER-OVERVIEW.md`](docs/00-MASTER-OVERVIEW.md).
 
-**Status:** Living document. **Last updated:** 2026-09-08 · **Current phase:** Phase 0 (Foundations) —
+**Status:** Living document. **Last updated:** 2026-09-09 · **Current phase:** Phase 0 (Foundations) —
 *planning complete, implementation not started*. Keep the [Project status](#8-project-status-keep-this-current)
 and [Decision log](#9-decision-log-append-only) sections current on every meaningful change.
 
@@ -307,8 +307,10 @@ Per-phase done vs. remaining:
 
 **Now / Next:** Infrastructure and all stage code are in place and unit-green, and **realistic inputs now
 exist on demand** via `scripts/make_sample_dataset.py` (real OpenDroneMap imagery + real GPS EXIF, or a
-ground-truth synthetic city) — both are **proven end-to-end through S0 ingest** (CRS derived from the real
-track, not hardcoded). The next high-value action is a **real end-to-end run on the cloud-T4 tier** — the
+ground-truth synthetic city) — both are **proven on the cloud T4 through S1 frame-QA** (S0 ingest with the
+CRS derived from the real track, not hardcoded; S1 green), and the first `s2_poses` break that run hit — a
+pycolmap `image_list`→`image_names` API rename — is now fixed (§9), so the next run exercises real SfM
+matching + incremental mapping on the T4. The next high-value action is a **real end-to-end run on the cloud-T4 tier** — the
 no-local-deps path is now `notebooks/drishti_colab_full.ipynb`, which runs **all 11 stages** on the T4
 (import → run → export + logs) so the finished bundle only needs to be *viewed* locally; the tier-split
 `notebooks/drishti_cloud_t4.ipynb` (or `docker/cloud.Dockerfile`) remains for keeping the CPU stages
@@ -327,6 +329,39 @@ list of what's done vs. remaining directly under this table.
 
 Record every decision that a future agent would otherwise have to reverse-engineer. Newest at the top.
 
+- **2026-09-09 — `s2_poses` pycolmap API drift fixed (`image_list` → `image_names`).** The first real
+  Colab run past install reached `s2_poses` and failed loudly: `extract_features(): incompatible function
+  arguments … Invoked with: … image_list=[…], camera_mode=CameraMode.AUTO`. **Root cause:** `pyproject`
+  pins `pycolmap>=0.6` (in the `poses` extra), so a newer pycolmap installed whose `extract_features`
+  renamed the image-allowlist **keyword** `image_list` → `image_names` (signature now
+  `(database_path, image_path, image_names=[], camera_mode=…, reader_options=…, extraction_options=…,
+  device=…, cancellation_token=None)`). **Fix (`src/drishti/recon/sfm.py`):** pass that allowlist
+  **positionally** (its position is unchanged across the rename) and keep `camera_mode` as a keyword (stable
+  name) — one line, works on both old and new pycolmap, and any *further* drift still fails loudly with
+  pycolmap's own error (no masking). **Verified the downstream S2 calls are unaffected** against the
+  authoritative pycolmap quickstart: `match_exhaustive(database_path)` / `match_sequential(database_path)`
+  (first positional `database_path`) and `incremental_mapping(database_path, image_dir, output_path)` (three
+  positionals) match our calls exactly; the `cam_from_world` / `points3D` / `cameras` reconstruction access
+  is the current API the installed pycolmap exposes. No behavior/metrics change — same real SfM, same
+  fail-loud contract. Next: re-run (or `drishti resume runs/colab-full-20260908-205447`) to push S2 through
+  matching + incremental mapping on the T4. *(Agent.)*
+- **2026-09-09 — Cloud-notebook install made resilient; Open3D↔Python-3.13 blocker resolved with a
+  uv-built 3.12 env.** A real Colab run of `drishti_colab_full.ipynb` failed: `pip install -e ".[…,recon,…]"`
+  aborted with `Could not find a version that satisfies the requirement open3d>=0.18 … (from versions:
+  none)`, and because that one command bundled every extra atomically, **nothing** installed →
+  `drishti: command not found`. **Root cause (verified against PyPI):** Open3D's latest (0.19.0) publishes
+  wheels only through **cp312**, but current Colab/Kaggle run **Python 3.13** — no Open3D wheel exists, and
+  Open3D is genuinely required by `s7_dense` (TSDF) and `s8_mesh` (Poisson). **Fix (both notebooks' install
+  cell):** (1) install DRISHTI **core first** so the CLI always lands, then each heavy group **in isolation**
+  (`pipi(..., required=False)`) so one un-buildable wheel can't cascade; (2) if `sys.version_info > (3,12)`,
+  build an isolated **Python 3.12** env with `uv` (`uv venv --seed`), install everything there, and prepend
+  its `bin` to `PATH` so every later `!drishti` / `!python` / `subprocess` transparently uses it (all later
+  cells shell out, so none needed editing); on ≤3.12 it installs in place and keeps the hosted CUDA torch;
+  (3) end with an `OK`/`MISSING` capability probe mirroring what `doctor` gates on. **Also fixed a latent
+  bug in the tier-split notebook:** its install never added `transformers`, yet `--upto s7_dense` runs
+  S3/S4 which load their models through it → would have blocked; now installed. Updated `HOW_TO_USE.md`
+  (Step 2 + gotchas) and both READMEs. Honest fallback noted for the user: if `uv` can't fetch a Python in
+  a given session, switch to `condacolab`. No stage code changed. *(Agent.)*
 - **2026-09-09 — Full-pipeline Colab notebook added; two packaging gaps + the `max`-profile crash fixed
   across the notebooks and GUIDE.** Added `notebooks/drishti_colab_full.ipynb` — runs **all 11 stages**
   (`s0_ingest → report`) on a free T4 for users who lack the heavy deps locally, with a complete

@@ -32,6 +32,11 @@ deliverable) — and, optionally, portable **Blender 4.2** so the **FBX** output
 skipped. It runs the **`balanced`** profile: `--profile max` selects `dense.method=gaussian` +
 `mesh.method=2dgs`, which this build does not implement and which **raise loudly** at `s7_dense`.
 
+The §2 install cell is self-healing: it installs the CLI first and each heavy group in isolation, and —
+because Open3D (needed by `s7_dense`/`s8_mesh`) has no wheel for Colab's current **Python 3.13** — it
+auto-builds an isolated **Python 3.12** environment with `uv` and routes the rest of the notebook through
+it, so a genuinely full run works on today's runtimes.
+
 **Quick start**
 
 1. Open in Colab → *Runtime → Change runtime type → GPU (T4)* (or enable the Kaggle GPU accelerator).

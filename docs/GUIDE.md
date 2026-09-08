@@ -110,6 +110,13 @@ pip install -e ".[video,poses,geo,recon,depth,telem]"
 pip install -e ".[video,geo,recon,poses,spine,telem,depth,server]"
 ```
 
+> **On Colab/Kaggle, prefer the notebooks over this raw command.** Their current runtime is **Python
+> 3.13**, for which **Open3D has no wheel** (it caps at cp312) — so `.[recon]` makes this atomic install
+> abort, taking the `drishti` CLI down with it. `notebooks/drishti_colab_full.ipynb` (and the tier-split
+> `drishti_cloud_t4.ipynb`) handle this: they install each group in isolation and, on a >3.12 kernel,
+> auto-build a Python 3.12 env with `uv`. They also add `transformers` and `laspy`, which no extra lists
+> but S3/S4 and S10 need (see §18). Use the raw command only on a machine with Python ≤3.12.
+
 After installing, **always run the doctor** — it tells you the truth about *this* machine:
 
 ```bash

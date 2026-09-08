@@ -42,6 +42,10 @@ Heavy groups (`recon`, `poses`, `spine`, `depth`) need native libraries / a GPU 
 the machine that runs those stages (local workstation or a Colab/Kaggle session). The core spine
 installs everywhere.
 
+> `recon` pulls **Open3D**, which has wheels only through **Python 3.12**. On Python 3.13+ (today's
+> Colab/Kaggle) install fails — use the notebooks in [`notebooks/`](notebooks/), which auto-build a 3.12
+> environment. See [`docs/GUIDE.md`](docs/GUIDE.md) §2.
+
 ## Prepare your data (where your footage + metadata go)
 
 DRISHTI reads a **dataset descriptor** — a small YAML file that points at your real files. It ships

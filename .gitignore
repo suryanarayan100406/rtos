@@ -41,6 +41,7 @@ models_cache/
 *.fbx
 *.tif
 *.tiff
+*.zip
 
 # --- OS ---
 .DS_Store

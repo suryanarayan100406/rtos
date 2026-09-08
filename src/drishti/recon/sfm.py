@@ -49,9 +49,11 @@ def run_colmap_sfm(
     out_dir.mkdir(exist_ok=True)
 
     camera_mode = pycolmap.CameraMode.AUTO if self_calibrate else pycolmap.CameraMode.SINGLE
+    # The 3rd positional arg is the image-name allowlist. pycolmap renamed this *keyword*
+    # (image_list -> image_names) around 0.6; its position is unchanged, so pass it
+    # positionally to work on both old and new pycolmap. camera_mode is stable by name.
     pycolmap.extract_features(
-        database_path=str(db_path), image_path=str(image_dir),
-        image_list=image_list, camera_mode=camera_mode,
+        str(db_path), str(image_dir), image_list, camera_mode=camera_mode,
     )
     if matcher == "exhaustive":
         pycolmap.match_exhaustive(str(db_path))

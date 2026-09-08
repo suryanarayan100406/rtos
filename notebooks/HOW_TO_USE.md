@@ -50,13 +50,21 @@ set `REPO_DIR` to its path, then skip the clone.)
 
 ## Step 2 — Install everything
 
-Run **§2 · Install**. This keeps Colab's CUDA PyTorch and adds the heavy capability groups **plus two
-packages the extras don't list but a full run genuinely needs**:
+Run **§2 · Install**. You don't have to edit anything — just run the cell. It is self-healing:
 
-- **`transformers`** — S3 (masking) and S4 (depth) load their models through it.
-- **`laspy`** — S10 writes the **LAS** point-cloud deliverable.
+- **It installs DRISHTI core first**, then each heavy group in isolation, so one un-buildable wheel can
+  never abort the whole install (that failure is what leaves you with `drishti: command not found`).
+- **It works around Colab's Python 3.13.** The dense/mesh stages need **Open3D**, which ships wheels only
+  up to Python 3.12, and today's Colab/Kaggle run 3.13. So on a > 3.12 kernel the cell builds an isolated
+  **Python 3.12** environment (via [`uv`](https://github.com/astral-sh/uv)), installs everything there,
+  and puts it first on `PATH` — every later `!drishti` / `!python` transparently uses it. This is what
+  makes a genuinely **full** run (Open3D and all) possible on current runtimes. Expect it to take a few
+  minutes the first time (it downloads a Python plus CUDA PyTorch).
+- **It adds two packages the `pyproject` extras don't list** but a full run needs: **`transformers`**
+  (S3/S4 load their models through it) and **`laspy`** (S10 writes the LAS deliverable).
 
-You don't have to do anything; just run the cell. `pip check` warnings at the end are non-fatal.
+The cell finishes with a capability probe printing `OK` / `MISSING` per module — that's your first honest
+look at what's installed; §4 `doctor` then gates each stage on the same imports.
 
 ## Step 3 — (optional) Blender, for the FBX file
 
@@ -173,6 +181,11 @@ drishti resume runs/<run_id>             # continues at s8_mesh; the GPU stages 
 
 ## Honest gotchas (so nothing surprises you)
 
+- **Colab runs Python 3.13; Open3D has no 3.13 wheel.** Open3D (used by `s7_dense` TSDF and `s8_mesh`
+  Poisson) publishes wheels only through cp312, so a naïve `pip install .[recon]` fails on Colab and,
+  because it's one atomic command, takes the whole install down (`drishti: command not found`). §2 fixes
+  this by building an isolated **Python 3.12** env with `uv` and routing the notebook through it. If `uv`
+  can't fetch a Python in your session, the alternative is `condacolab` (ask and I'll wire it in).
 - **`--profile max` crashes today.** It picks `gaussian` / `2dgs`, which aren't implemented; both cloud
   notebooks already override those to TSDF + Poisson. See [`../docs/GUIDE.md`](../docs/GUIDE.md) §5.
 - **`transformers` / `laspy` aren't in any `pyproject` extra.** The notebooks install them explicitly;
