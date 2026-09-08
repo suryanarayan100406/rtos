@@ -32,7 +32,9 @@ class DepthAnythingV2:
         """Return an (H,W) float32 relative-depth map for a BGR image."""
         torch = self._torch
         h, w = img_bgr.shape[:2]
-        rgb = img_bgr[..., ::-1]  # BGR -> RGB
+        # BGR->RGB via ``[..., ::-1]`` is a negative-stride view; make it C-contiguous so newer
+        # transformers image processors (which call torch.from_numpy directly) accept it. See detect.py.
+        rgb = np.ascontiguousarray(img_bgr[..., ::-1])
         inputs = self.processor(images=rgb, return_tensors="pt").to(self.device)
         with torch.no_grad():
             pred = self.model(**inputs).predicted_depth  # (1, h', w')

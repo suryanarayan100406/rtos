@@ -307,11 +307,13 @@ Per-phase done vs. remaining:
 
 **Now / Next:** Infrastructure and all stage code are in place and unit-green, and **realistic inputs now
 exist on demand** via `scripts/make_sample_dataset.py` (real OpenDroneMap imagery + real GPS EXIF, or a
-ground-truth synthetic city) — both are **proven on the cloud T4 through S2 SfM** (S0 ingest with the CRS
-derived from the real track, not hardcoded; S1 frame-QA; S2 COLMAP registered **17/18** brighton_beach
-frames to a kept reconstruction). Two pycolmap-4.3 API drifts surfaced there and are now fixed (§9:
-`image_list`→`image_names`, and `Image.cam_from_world` now a method), so the next run pushes S2's recovered
-poses on into S3 masking and the neural/dense stages. The next high-value action is a **real end-to-end run on the cloud-T4 tier** — the
+ground-truth synthetic city) — both are **proven on the cloud T4 through S2 SfM and into the neural stages** (S0 ingest with the CRS
+derived from the real track, not hardcoded; S1 frame-QA; S2 COLMAP registered **all 18** brighton_beach
+frames to a kept reconstruction — "degraded" there only reflects the logged GTSAM-skip). Three real
+drifts surfaced on that run and are now fixed: two pycolmap-4.3 API changes (§9: `image_list`→`image_names`,
+and `Image.cam_from_world` now a method) and a transformers negative-stride crash in the S3/S4 neural
+wrappers (§9: contiguous BGR→RGB), so the next run pushes past S3 masking + S4 depth into the
+dense/mesh/geo/export stages. The next high-value action is a **real end-to-end run on the cloud-T4 tier** — the
 no-local-deps path is now `notebooks/drishti_colab_full.ipynb`, which runs **all 11 stages** on the T4
 (import → run → export + logs) so the finished bundle only needs to be *viewed* locally; the tier-split
 `notebooks/drishti_cloud_t4.ipynb` (or `docker/cloud.Dockerfile`) remains for keeping the CPU stages
@@ -330,6 +332,20 @@ list of what's done vs. remaining directly under this table.
 
 Record every decision that a future agent would otherwise have to reverse-engineer. Newest at the top.
 
+- **2026-09-09 — S3 masking / S4 depth negative-stride crash fixed (contiguous BGR→RGB).** With both
+  pycolmap drifts in, the same Colab run drove S2 to a kept reconstruction and advanced to **S3 masking**,
+  which downloaded RT-DETR (Apache-2.0) and then failed loudly: `ValueError: At least one stride in the
+  given numpy array is negative … tensors with negative strides are not currently supported` at
+  `RTDetrDetector.detect` → transformers `image_processing_backends.process_image` → `torch.from_numpy(image)`.
+  **Root cause:** the BGR→RGB conversion `img_bgr[..., ::-1]` returns a *negative-stride view*; older
+  transformers copied it internally, but the newer image-processor backend (pulled by `-U transformers>=4.45`)
+  calls `torch.from_numpy()` on it directly, which rejects negative strides. **Fix:** wrap it in
+  `np.ascontiguousarray(...)` in both neural wrappers (`src/drishti/models/detect.py`,
+  `src/drishti/models/depth.py`) — the same pattern already in `recon/tsdf.py:35`. Fixed **both**
+  proactively (a repo-wide grep found exactly three `[..., ::-1]` sites; tsdf was already correct) so
+  **S4 depth won't hit the identical wall** — its `predict()` feeds `rgb` to the same processor call. Real
+  model output, no behavior/metrics change, same fail-loud contract. Next: re-run / `drishti resume` to push
+  S3→S4→S6+ (dense/mesh/geo/export/report). *(Agent.)*
 - **2026-09-09 — `s2_poses` second pycolmap drift fixed (`Image.cam_from_world` is now a *method*).**
   With the `image_names` fix in, a real Colab run drove S2 through **full SfM** — SIFT on all 18
   brighton_beach frames, sequential matching, incremental mapping **registered 17/18 images**, reconstruction

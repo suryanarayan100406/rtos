@@ -33,7 +33,10 @@ class RTDetrDetector:
         """Return [{label, score, box=[x1,y1,x2,y2]}] for one BGR frame."""
         torch = self._torch
         h, w = img_bgr.shape[:2]
-        rgb = img_bgr[..., ::-1]
+        # ``[..., ::-1]`` (BGR->RGB) is a negative-stride *view*; newer transformers image processors
+        # call torch.from_numpy() on it directly, which rejects negative strides. Materialize a
+        # C-contiguous copy (older transformers did this internally) so the tensor conversion works.
+        rgb = np.ascontiguousarray(img_bgr[..., ::-1])
         inputs = self.processor(images=rgb, return_tensors="pt").to(self.device)
         with torch.no_grad():
             outputs = self.model(**inputs)
