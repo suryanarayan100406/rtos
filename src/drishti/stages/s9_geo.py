@@ -47,7 +47,10 @@ class GeoStage(Stage):
         def _write_tif(name, grid, res, count=1, dtype="float32", nodata=None, rgb=None):
             transform = from_origin(bounds[0], bounds[3], res, res)
             path = out_dir / name
-            profile = {"driver": "GTiff", "height": grid.shape[0], "width": grid.shape[1],
+            # RGB writes pass the raster as `rgb` (H, W, 3) and leave `grid` None; single-band
+            # writes pass a 2-D `grid`. Take the shape from whichever one is actually present.
+            shape_src = grid if grid is not None else rgb
+            profile = {"driver": "GTiff", "height": shape_src.shape[0], "width": shape_src.shape[1],
                        "count": count, "dtype": dtype, "crs": crs, "transform": transform,
                        "compress": "deflate"}
             if nodata is not None:
