@@ -41,6 +41,15 @@ class MeshStage(Stage):
         if len(pcd.points) == 0:
             raise RuntimeError("s8_mesh: dense cloud is empty.")
 
+        # The dense cloud lives in the absolute ground CRS (e.g. UTM: easting ~5.8e5, northing ~5.2e6).
+        # A scene only ~100 m wide sitting on million-metre coordinates wipes out the float precision
+        # that Qhull needs for normal orientation and Poisson, and it fails loudly with QH6417
+        # ("wide facet due to facet merges"). Meshing is invariant to a rigid translation, so we do the
+        # math in a local frame centred on the cloud, then shift the finished mesh back to the CRS.
+        # Pure translation — geometry is bit-for-bit unchanged, no resolution or accuracy trade-off.
+        origin = np.asarray(pcd.get_center(), dtype=float)
+        pcd.translate(-origin)
+
         pcd.estimate_normals(
             search_param=o3d.geometry.KDTreeSearchParamHybrid(
                 radius=3.0 * voxel, max_nn=cfg.mesh.normal_max_nn)
@@ -60,6 +69,9 @@ class MeshStage(Stage):
         n_v, n_f = len(mesh.vertices), len(mesh.triangles)
         if n_f == 0:
             raise RuntimeError("s8_mesh: Poisson produced no faces (try higher poisson_depth).")
+
+        # Undo the local-frame shift: put the mesh back in the ground CRS the dense cloud used.
+        mesh.translate(origin)
 
         mesh_ply = bundle.stage_dir(self.name) / "mesh.ply"
         o3d.io.write_triangle_mesh(str(mesh_ply), mesh, write_vertex_colors=True,
