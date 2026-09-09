@@ -7,10 +7,10 @@
 name: my_mission
 
 # --- Mandatory inputs ---
-video: data/my_mission/flight.MP4          # 1080p/4K recorded single-pass clip
+video: data/my_mission/flight.mp4          # 1080p/4K recorded single-pass clip
 telemetry:
   format: dji_srt                        # dji_srt | csv | mavlink | exif
-  path: data/my_mission/flight.SRT
+  path: data/my_mission/flight.srt
   # For CSV, map your columns (names or 0-based indices):
   # csv:
   #   time: timestamp        # seconds, or ISO-8601; auto-detected
