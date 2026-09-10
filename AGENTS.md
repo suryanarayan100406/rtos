@@ -305,7 +305,12 @@ Per-phase done vs. remaining:
   server (thin, manifest-truthful) built + tested; CI (lint + pytest matrix) written; Docker images
   written. Remaining: wire the ladder into the remaining stages, perf tuning, broader failure-injection tests.
 
-**Now / Next:** Infrastructure and all stage code are in place and unit-green, and **realistic inputs now
+**Now / Next:** The first real `aukerman` full run produced a **fragmented/floating-block mesh** — root-caused
+to **two independent run-config bugs** (sequential matcher → pose drift; `depth_trunc` clipped below the
+~100 m flying height → ground deleted) and fixed in the Colab notebook §6 (see §9, 2026-09-10). Bug #1 is
+measured-proven (RMSE 26.3→6.5 m); the corrected **6B block** (exhaustive + `depth_trunc=150`, 5 cm voxel
+unchanged) awaits a **~30 GB runtime (Kaggle free / Colab High-RAM)** end-to-end run for verification.
+Infrastructure and all stage code are in place and unit-green, and **realistic inputs now
 exist on demand** via `scripts/make_sample_dataset.py` (real OpenDroneMap imagery + real GPS EXIF, or a
 ground-truth synthetic city) — both are **proven on the cloud T4 through S2 SfM and into the neural stages** (S0 ingest with the CRS
 derived from the real track, not hardcoded; S1 frame-QA; S2 COLMAP registered **all 18** brighton_beach
@@ -332,6 +337,31 @@ list of what's done vs. remaining directly under this table.
 
 Record every decision that a future agent would otherwise have to reverse-engineer. Newest at the top.
 
+- **2026-09-10 — Fragmented/floating-block mesh root-caused to TWO independent bugs; Colab §6 rewritten.**
+  The `aukerman` full run (`runs/colab-free-20260909-152600`) produced a smeared mesh of floating blocks
+  with DSM coverage **0.003** — not a viewer artifact, a reconstruction failure. Two independent root causes,
+  both in the notebook's run config (not the stage code):
+  **(1) Matcher.** `poses.matcher` defaulted to `sequential`, which links only consecutive frames. The
+  registry datasets are **lawnmower-grid aerial surveys**; without cross-strip matches the strips never
+  loop-close and the trajectory drifts. **Proven locally** (`runs/local-verify-exhaustive/`, S2 only,
+  runs on free T4): `sequential → exhaustive` moved trajectory **RMSE 26.303 → 6.513 m**, sparse points
+  **15 903 → 34 938**, registration **→ 75/75 (100%)**, camera-altitude drift **66.6 → 25.1 m**.
+  **(2) Depth clip.** `dense.depth_trunc_m` is Open3D's **max integration depth** (`tsdf.py:38-41`,
+  `create_from_color_and_depth(..., depth_trunc=…)`) — every pixel deeper is discarded. Measured aukerman
+  flying height **median 101.6 m AGL (min 80.3, max 130.2)** from `poses.json` centre-Z vs. sparse-ground
+  median, so the ground sits ~100 m below each camera. Both blocks clipped below that (6A=40 m, 6B=100 m),
+  so the ground was deleted → floating fragments. This is **not** the TSDF band (`sdf_trunc`) or resolution
+  (`voxel_m`); voxel stays **5 cm**, no quality loss.
+  **Fix (notebook only, `notebooks/drishti_colab_full.ipynb` cells 15/16/17):** both blocks now pass
+  `--set poses.matcher=exhaustive`; **6B** (now the recommended path for aerial datasets) sets
+  `dense.depth_trunc_m=150` (≈1.3× max AGL, clears the 130 m cameras + oblique slant); **6A** keeps the
+  40 m clamp but is re-scoped to **low-altitude flights only**, with an explicit "aukerman → use 6B" warning;
+  markdown §6 rewritten to explain depth_trunc must exceed AGL and to steer aerial runs to a **~30 GB
+  runtime (Kaggle free / Colab High-RAM)** — the honest cost of 150 m @ 5 cm is RAM, not resolution.
+  **Status:** bug #1 measured-proven; bug #2 diagnosed from measured AGL vs. clip (full 150 m/5 cm mesh
+  **not yet run end-to-end** — local box lacks RAM + heavy extras). **Next:** user runs **6B on a ~30 GB
+  runtime** and reports S2 `spine_fit_rmse_m` + S9 `dsm_coverage` for verification before trusting the model.
+  No stage code changed; `sfm.py` already dispatched `exhaustive`, `tsdf.py` semantics unchanged. *(Agent.)*
 - **2026-09-09 — S3 masking / S4 depth negative-stride crash fixed (contiguous BGR→RGB).** With both
   pycolmap drifts in, the same Colab run drove S2 to a kept reconstruction and advanced to **S3 masking**,
   which downloaded RT-DETR (Apache-2.0) and then failed loudly: `ValueError: At least one stride in the
