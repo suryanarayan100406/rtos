@@ -308,8 +308,12 @@ Per-phase done vs. remaining:
 **Now / Next:** The first real `aukerman` full run produced a **fragmented/floating-block mesh** — root-caused
 to **two independent run-config bugs** (sequential matcher → pose drift; `depth_trunc` clipped below the
 ~100 m flying height → ground deleted) and fixed in the Colab notebook §6 (see §9, 2026-09-10). Bug #1 is
-measured-proven (RMSE 26.3→6.5 m); the corrected **6B block** (exhaustive + `depth_trunc=150`, 5 cm voxel
-unchanged) awaits a **~30 GB runtime (Kaggle free / Colab High-RAM)** end-to-end run for verification.
+measured-proven (RMSE 26.3→6.5 m). The corrected **6B block** (exhaustive + `depth_trunc=150`, 5 cm voxel)
+then **OOM-killed (`exit -9`) at s7_dense even on Kaggle's ~30 GB** — root-caused to a **third bug: the dense
+stage built one monolithic `ScalableTSDFVolume` over the whole aerial scene and never used the `dense.tile`
+config that already existed to bound it.** Fixed in stage code (`recon/tsdf.py` + `stages/s7_dense.py`, see
+§9 2026-09-10 #2): `fuse_tsdf_tiled` fuses one ground tile at a time so peak RAM tracks tile extent, not
+scene size — voxel stays 5 cm, `depth_trunc` stays 150 m. Awaits an end-to-end run for verification.
 Infrastructure and all stage code are in place and unit-green, and **realistic inputs now
 exist on demand** via `scripts/make_sample_dataset.py` (real OpenDroneMap imagery + real GPS EXIF, or a
 ground-truth synthetic city) — both are **proven on the cloud T4 through S2 SfM and into the neural stages** (S0 ingest with the CRS
@@ -334,6 +338,27 @@ list of what's done vs. remaining directly under this table.
 ---
 
 ## 9. Decision log (append-only)
+
+- **2026-09-10 (#2) — s7_dense OOM (`exit -9`) on Kaggle root-caused + fixed with spatial TSDF tiling.**
+  The corrected 6B run (exhaustive matcher, `depth_trunc=150`, voxel 5 cm) advanced past S2/S3/S4/S6 and
+  then the **OS OOM-killed s7_dense (`exit -9`) even on Kaggle's ~30 GB** (`notebooks/2.txt:2777-2780`).
+  **Root cause:** `s7_dense`/`fuse_tsdf` built a **single monolithic** `ScalableTSDFVolume` spanning the
+  entire aerial footprint; at 5 cm over a 150 m depth range the hashed surface-block count exhausts host
+  RAM. The prior §6 note ("the honest cost of 150 m @ 5 cm is RAM… use a bigger runtime") was **wrong** —
+  Kaggle's 30 GB is the bigger runtime and it still died. The real bound already existed in config as
+  `DenseCfg.tile` (`TileCfg`: `enabled=True, tile_m=60, overlap_m=8`) but **was never wired into the stage**.
+  **Fix (stage code, not just notebook):** added `fuse_tsdf_tiled` in `recon/tsdf.py` — partitions frames
+  into `tile_m` ground cells by camera-center XY, fuses each cell in its own volume (freed + `gc.collect()`
+  before the next) from frames within `overlap_m` of the cell, extracts, then crops points to the core cell
+  (boundary cells extend to ±inf so nothing is dropped at the scene edge) to dedupe overlap. `s7_dense.py`
+  now builds re-loadable per-frame specs (`center_xy` + artifact paths + extrinsic, depth/color loaded
+  lazily *inside* each tile so only one tile's images are resident) and routes through the tiled fuser when
+  `dense.tile.enabled`, else the original single-volume `fuse_tsdf`. **Voxel stays 5 cm, `depth_trunc` stays
+  150 m — no quality/resolution loss; peak RAM now tracks one tile, not the scene.** Tested with an injected
+  fake Open3D (`tests/test_recon_tsdf_tiled.py`, 4 cases: full coverage + no duplicates, far-field edge kept,
+  empty-input raise, `load`→None skip); full suite **102 passed**. **Not yet run end-to-end** (local box has
+  no Open3D + insufficient RAM). **Next:** user re-runs 6B on Kaggle; expect s7_dense to complete — report
+  s7 `n_points`/`n_frames_fused` and peak RAM. *(Agent.)*
 
 Record every decision that a future agent would otherwise have to reverse-engineer. Newest at the top.
 

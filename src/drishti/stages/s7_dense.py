@@ -36,7 +36,7 @@ class DenseStage(Stage):
                 "the shipped dense path is TSDF (set dense.method=tsdf)."
             )
 
-        from ..recon.tsdf import fuse_tsdf
+        from ..recon.tsdf import fuse_tsdf, fuse_tsdf_tiled
 
         poses_doc = bundle.read_json("s6_global/poses_global.json")
         depth_doc = bundle.read_json("s4_depth/depth.json")
@@ -52,27 +52,45 @@ class DenseStage(Stage):
         idx_by_name = {_P(k["path"]).name: k["index"] for k in kf_doc["keyframes"]}
         path_by_name = {_P(k["path"]).name: k["path"] for k in kf_doc["keyframes"]}
 
-        def _frames():
-            for p in poses_doc["poses"]:
-                name = p["name"]
-                midx = idx_by_name.get(name)
-                d = depth_by_index.get(midx)
-                if d is None or name not in path_by_name:
-                    continue
-                depth = np.load(bundle.artifact_path(d["depth"]))
-                color = read_image(bundle.artifact_path(path_by_name[name]))
-                R_wc = np.asarray(p["R"], dtype=float)
-                center = np.asarray(p["center_crs"], dtype=float)
-                extr = np.eye(4)
-                extr[:3, :3] = R_wc
-                extr[:3, 3] = -R_wc @ center
-                yield color, depth, extr
+        # Re-iterable per-frame descriptors: camera center in the ground CRS (for spatial tiling) plus
+        # the artifact paths + extrinsic needed to lazily materialize each frame during fusion.
+        specs: list[dict] = []
+        for p in poses_doc["poses"]:
+            name = p["name"]
+            midx = idx_by_name.get(name)
+            d = depth_by_index.get(midx)
+            if d is None or name not in path_by_name:
+                continue
+            R_wc = np.asarray(p["R"], dtype=float)
+            center = np.asarray(p["center_crs"], dtype=float)
+            extr = np.eye(4)
+            extr[:3, :3] = R_wc
+            extr[:3, 3] = -R_wc @ center
+            specs.append({
+                "center_xy": (float(center[0]), float(center[1])),
+                "depth": d["depth"], "color": path_by_name[name], "extr": extr,
+            })
+
+        def _load(spec: dict):
+            depth = np.load(bundle.artifact_path(spec["depth"]))
+            color = read_image(bundle.artifact_path(spec["color"]))
+            return color, depth, spec["extr"]
 
         voxel = cfg.dense.tsdf_voxel_m
-        points, colors, used = fuse_tsdf(
-            _frames(), fx, fy, cx, cy, width, height,
-            voxel_m=voxel, sdf_trunc=4.0 * voxel, depth_trunc=cfg.dense.depth_trunc_m,
-        )
+        tile = cfg.dense.tile
+        if tile.enabled:
+            # Memory-bounded: fuse one ground tile at a time so peak RAM tracks tile extent, not the
+            # whole aerial scene (a monolithic volume at this voxel size OOM-kills large captures).
+            points, colors, used = fuse_tsdf_tiled(
+                specs, _load, fx, fy, cx, cy, width, height,
+                voxel_m=voxel, sdf_trunc=4.0 * voxel, depth_trunc=cfg.dense.depth_trunc_m,
+                tile_m=tile.tile_m, overlap_m=tile.overlap_m,
+            )
+        else:
+            points, colors, used = fuse_tsdf(
+                (_load(s) for s in specs), fx, fy, cx, cy, width, height,
+                voxel_m=voxel, sdf_trunc=4.0 * voxel, depth_trunc=cfg.dense.depth_trunc_m,
+            )
         if len(points) == 0:
             raise RuntimeError("s7_dense: TSDF produced an empty cloud.")
 
