@@ -138,6 +138,16 @@ class MeshCfg(_Base):
     poisson_depth: int = 11
     density_quantile: float = 0.03   # crop this lowest fraction of Poisson vertex densities
     normal_max_nn: int = 30          # kNN for normal estimation
+    # Downsample voxel (m) for the meshing INPUT only (the 5 cm dense.ply is untouched). Feeding Poisson
+    # points finer than its octree leaf (scene_extent / 2**poisson_depth) wastes RAM without adding mesh
+    # detail — a 300 m scene at depth 11 resolves ~16 cm, so a 100 M-point 5 cm aerial cloud OOMs the mesh
+    # for nothing. 0.0 = auto (match the octree leaf, clamped >= dense voxel so we never invent detail);
+    # >0 forces a voxel; <=dense-voxel effectively disables the reduction.
+    mesh_voxel_m: float = 0.0
+    # Above this many points, orient normals with the O(N) aerial up-prior instead of the O(N*kNN)
+    # tangent-plane MST (orient_normals_consistent_tangent_plane), which builds a graph over every point
+    # and exhausts host RAM on 10 M+ -point clouds. Up-orientation is correct for nadir 2.5D terrain.
+    consistent_normals_max_points: int = 5_000_000
     texture: Literal["mvs_texturing", "best_view"] = "mvs_texturing"
     emit_confidence: bool = True
     flag_inferred: bool = True

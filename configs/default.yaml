@@ -92,6 +92,8 @@ mesh:                     # S8
   poisson_depth: 11
   density_quantile: 0.03  # crop lowest-density Poisson vertices (thin/extrapolated surface)
   normal_max_nn: 30       # neighbors used for normal estimation
+  mesh_voxel_m: 0.0       # meshing-input downsample voxel; 0.0=auto (match Poisson octree leaf, >=dense voxel). Bounds S8 RAM; dense.ply stays 5cm
+  consistent_normals_max_points: 5000000  # above this, use O(N) up-prior normals (aerial); tangent-plane MST OOMs on 100M-pt clouds
   texture: mvs_texturing  # mvs_texturing | best_view
   emit_confidence: true
   flag_inferred: true     # mark completed/low-parallax geometry distinctly from measured

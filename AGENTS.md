@@ -284,7 +284,7 @@ and exit criteria: [`docs/implementation/01-IMPLEMENTATION-PLAN.md`](docs/implem
 
 **What "in progress" means here (honest):** the *code* for all 11 stages (S0–S10 + report) is written
 with real tools and guarded imports — **no stubs, no fake outputs**. The pure logic and core machinery
-are unit-tested (**108 tests passing, ruff clean**; a pre-existing `test_server` collection error —
+are unit-tested (**112 tests passing, ruff clean**; a pre-existing `test_server` collection error —
 the FastAPI `server` package not on this env's `PYTHONPATH` — is unrelated to the pipeline and tracked
 separately). What remains is **end-to-end validation on real
 footage with the heavy extras installed**, which needs the cloud-T4 / Docker environment (no local
@@ -330,7 +330,15 @@ the last tile's working volume again crossed 30 GB. Fixed by **streaming each ti
 PLY on disk and freeing them** (new `StreamingPlyWriter` in `io/pointcloud.py`, wired into S7 via an optional
 `sink` on `fuse_tsdf_tiled`) — peak RAM now tracks **one tile**, proven to fit since every tile completed
 individually. Same pass vectorized the PLY color writer (was a per-point Python loop — hours at 100 M pts).
-Awaits an end-to-end run for verification.
+That fix **worked**: `notebooks/6.txt` shows **s7_dense complete** (`✓ done in 467.3s`, 40 tiles, ~103.6 M
+points streamed to disk). The kill then moved to **s8_mesh** (SIGKILL at stage start) — the meshing OOM
+predicted above. Root-caused (§9 2026-09-11 #3) to Poisson being fed the full 5 cm, ~103.6 M-point cloud:
+(a) `orient_normals_consistent_tangent_plane` builds an MST/graph over *every* point (tens of GB at 100 M),
+and (b) a 297 m scene at `poisson_depth=11` resolves only ~16 cm, so the 5 cm cloud is ~3× finer than the
+mesh can represent — meshing all of it OOMs for detail Poisson smooths away. **Fixed:** S8 now downsamples
+the *meshing input* to the octree-leaf size (auto from depth+extent, clamped ≥ dense voxel — the 5 cm
+`dense.ply` product is untouched) and orients normals with the O(N) aerial up-prior above a point threshold.
+Voxel/`depth_trunc` for the dense product unchanged. Awaits an end-to-end run for verification.
 Infrastructure and all stage code are in place and unit-green, and **realistic inputs now
 exist on demand** via `scripts/make_sample_dataset.py` (real OpenDroneMap imagery + real GPS EXIF, or a
 ground-truth synthetic city) — both are **proven on the cloud T4 through S2 SfM and into the neural stages** (S0 ingest with the CRS
@@ -378,6 +386,43 @@ list of what's done vs. remaining directly under this table.
   s7 `n_points`/`n_frames_fused` and peak RAM. *(Agent.)*
 
 Record every decision that a future agent would otherwise have to reverse-engineer. Newest at the top.
+
+- **2026-09-11 (#3) — s8_mesh OOM: mesh Poisson over the octree-leaf-downsampled cloud + O(N) aerial normals.**
+  With S7 streaming in place, `aukerman` 6B on Kaggle **completed s7_dense** (`notebooks/6.txt`: `✓ s7_dense
+  — done in 467.3s`, 40 tiles, **~103.6 M points** streamed to disk) and then `[exit -9]` **at s8_mesh** — the
+  process was SIGKILLed the instant the stage started (last log line `▶ s8_mesh [local]`, no traceback = OS
+  OOM, not a Python error). This is the meshing pressure point flagged in §9 #2. **Root cause:** `s8_mesh`
+  fed the *entire* 5 cm, ~103.6 M-point cloud into Open3D Poisson. Two compounding costs: **(1)**
+  `orient_normals_consistent_tangent_plane` builds an EMST/Riemannian graph over **every** point — O(N·kNN)
+  memory, tens of GB at 100 M points, and the dominant killer; **(2)** the scene is **297 × 160 m** and
+  `poisson_depth=11`, so the finest octree leaf is `297·1.1/2^11 ≈ 0.16 m` — the mesh can only represent ~16 cm
+  detail, yet the cloud is **5 cm (~3× finer)**, ~5× inflated by monocular-depth "fog" (a 50.6 m Z-band).
+  Meshing all 103.6 M points spends ~100 GB of would-be RAM to produce detail Poisson smooths away.
+  **Fix (stage + config + tests):**
+  (1) `stages/s8_mesh.py` — before meshing, **downsample the working copy to the octree-leaf voxel** (new
+  pure helper `meshing_voxel_m(extent, depth, dense_voxel, override)` = `extent·1.1/2^depth`, clamped
+  `≥ dense_voxel` so we never invent detail; `POISSON_BBOX_SCALE=1.1` mirrors Open3D's bbox padding). On the
+  aukerman scene that's ~0.16 m, collapsing ~103.6 M → a few M points — matched to what depth-11 Poisson
+  actually resolves. Normals are then estimated at the new spacing, and **oriented with the O(N)
+  `orient_normals_to_align_with_direction([0,0,1])` aerial up-prior** when the (downsampled) cloud still
+  exceeds `consistent_normals_max_points` (5 M), else the tangent-plane MST as before. Up-orientation is
+  correct for nadir 2.5D terrain (a height field seen from above → outward normal ≈ world-up). `mesh.json`
+  now records `n_dense_points`, `n_mesh_input_points`, `mesh_voxel_m`.
+  (2) config — `MeshCfg.mesh_voxel_m=0.0` (0=auto octree-leaf; >0 forces a voxel; ≤dense-voxel disables the
+  reduction) and `MeshCfg.consistent_normals_max_points=5_000_000`; `configs/default.yaml` updated to match.
+  **Why this is not a quality loss:** the **5 cm `dense.ply` deliverable is untouched** — only the S8
+  *meshing input* is thinned, and only to the resolution the depth-11 mesh can hold, so the output mesh is
+  effectively unchanged while peak RAM drops from ~100 GB-class to a few GB. To recover finer mesh detail,
+  *raise* `poisson_depth` (auto-voxel follows it) rather than feeding more points. **On the recurring GPU
+  suggestion:** Open3D Poisson is CPU-only and has no drop-in CUDA path; the T4's 15 GB VRAM is < the 30 GB
+  host regardless, so — as with S7 — bounding CPU memory is the fix, not the device. **Tests:** +4 pure
+  tests for `meshing_voxel_m` (`tests/test_s8_mesh_voxel.py`: octree-leaf match, clamp-to-dense, override,
+  linear scaling with extent); the Open3D-coupled stage body runs only on the cloud tier. Full suite **112
+  passing, ruff clean**. **Status:** **unverified locally** (no dGPU / insufficient RAM for Open3D). First
+  proof is the next Kaggle run *completing* s8_mesh — report `n_mesh_input_points`, `mesh_voxel_m`,
+  `n_vertices`/`n_faces`, and peak RAM. Next likely stops if any: S9 DSM/DTM rasterization and S10 export
+  both stream the full dense cloud — watch those, but not pre-optimized (avoid engineering unseen failures).
+  *(Agent.)*
 
 - **2026-09-11 (#2) — s7_dense OOM, final layer: per-tile point *accumulation* → stream tiles to disk.**
   With the XY-clip (fb97c97) and Z-band + `tile_m` 60→40 fixes in, `aukerman` 6B on Kaggle (~30 GB) got
