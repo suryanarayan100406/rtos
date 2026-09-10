@@ -5,10 +5,17 @@ point cloud. No Open3D installed => loud failure. The fused cloud is the metric 
 
 A single monolithic ``ScalableTSDFVolume`` spanning a large aerial scene at a fine voxel size hashes an
 enormous number of surface blocks and can exhaust host RAM (the OS OOM-kills the run). :func:`fuse_tsdf_tiled`
-bounds peak memory by partitioning frames into ground tiles (by camera-center XY), fusing each tile in its
-own volume that is freed before the next, and cropping each tile's points to its core cell so overlapping
-tiles do not double-count. It keeps the full ``depth_trunc`` range — memory is bounded by tile *extent*,
-not by throwing away far-field depth.
+bounds peak memory by partitioning the *ground* into tiles, fusing each tile in its own volume that is
+freed before the next, and cropping each tile's points to its core cell so overlapping tiles do not
+double-count.
+
+The subtlety, and the fix that actually bounds memory for aerial (nadir) capture: a camera ~100 m AGL sees
+a ground footprint far wider than a tile, so simply grouping frames by camera-center XY and integrating
+each frame's *full* depth map still paints TSDF blocks across the whole scene — every tile then costs
+almost as much as the monolithic volume. So before integrating, each depth map is clipped (via
+:func:`_clip_depth_to_xy`) to the tile's ground-XY window: a tile's volume only hashes blocks for its own
+ground region (+overlap). Voxel size and the full ``depth_trunc`` range are untouched — no resolution or
+coverage loss; ``tile_m`` genuinely trades tile count against peak RAM.
 """
 from __future__ import annotations
 
@@ -17,7 +24,10 @@ from collections.abc import Callable, Iterable, Sequence
 
 import numpy as np
 
+from ..logging import get_logger
 from ..runtime.deps import require
+
+log = get_logger("drishti.recon.tsdf")
 
 
 def _make_volume(o3d, voxel_m: float, sdf_trunc: float):
@@ -38,6 +48,40 @@ def _integrate(o3d, vol, intr, color_bgr: np.ndarray, depth: np.ndarray,
         convert_rgb_to_intensity=False,
     )
     vol.integrate(rgbd, intr, extr.astype(np.float64))
+
+
+def _clip_depth_to_xy(
+    depth: np.ndarray, fx: float, fy: float, cx: float, cy: float,
+    extr: np.ndarray, x_lo: float, x_hi: float, y_lo: float, y_hi: float,
+) -> np.ndarray:
+    """Return a copy of ``depth`` with every pixel whose back-projected world XY falls outside
+    ``[x_lo, x_hi) x [y_lo, y_hi)`` set to 0 (invalid).
+
+    This is what actually bounds per-tile memory for nadir aerial imagery: each camera sees a ground
+    footprint far wider than a tile, so integrating a frame's *full* depth map paints TSDF blocks across
+    the whole scene regardless of which tile owns the camera. Clipping to the tile's ground window means a
+    tile's volume only hashes blocks for its own ground region (+overlap). Depth range (``depth_trunc``)
+    and voxel size are untouched — no resolution or coverage loss, only far-lateral pixels another tile
+    owns are dropped from *this* tile.
+    """
+    h, w = depth.shape
+    us, vs = np.meshgrid(np.arange(w, dtype=np.float64), np.arange(h, dtype=np.float64))
+    d = depth.astype(np.float64)
+    # camera-frame ray * depth
+    xc = (us - cx) / fx * d
+    yc = (vs - cy) / fy * d
+    pc = np.stack([xc, yc, d], axis=-1)          # (h, w, 3)
+    R = extr[:3, :3]
+    t = extr[:3, 3]
+    # world = R^T (cam - t); for row-vectors that is (pc - t) @ R
+    pw = (pc - t) @ R
+    inside = (
+        (d > 0) & (pw[..., 0] >= x_lo) & (pw[..., 0] < x_hi)
+        & (pw[..., 1] >= y_lo) & (pw[..., 1] < y_hi)
+    )
+    out = depth.copy()
+    out[~inside] = 0.0
+    return out
 
 
 def fuse_tsdf(
@@ -76,11 +120,13 @@ def fuse_tsdf_tiled(
 
     ``frame_specs`` is a re-iterable sequence of descriptors, each carrying ``center_xy`` (the camera
     position in the ground CRS, an (x, y) pair) plus whatever ``load`` needs to lazily produce that
-    frame's ``(color_bgr, depth_m, extrinsic_world2cam)`` — or ``None`` to skip it. Frames are grouped
-    into ``tile_m``-sized core cells over the camera-center XY extent; each cell is fused from the frames
-    whose camera center falls within ``overlap_m`` of it (so a tile has enough surrounding views to close
-    its core), then the extracted points are cropped to the core cell so neighbouring tiles do not
-    double-count. Boundary cells extend to +/-inf so nothing is dropped at the scene edge.
+    frame's ``(color_bgr, depth_m, extrinsic_world2cam)`` — or ``None`` to skip it. The ground is split
+    into ``tile_m``-sized core cells; each cell is fused from the frames whose camera center falls within
+    ``overlap_m`` of it, and — critically for wide-footprint nadir imagery — each frame's depth map is
+    clipped to the cell's ground window (core + overlap) before integration so the tile's volume only
+    hashes blocks for its own ground region (see :func:`_clip_depth_to_xy`). The extracted points are then
+    cropped to the core cell so neighbouring tiles do not double-count. Boundary cells extend to +/-inf so
+    nothing is dropped at the scene edge.
 
     Returns (points Nx3 float64, colors Nx3 float64 in [0,1], n_frames_used) — ``n_frames_used`` is the
     count of distinct frames integrated into at least one tile.
@@ -97,6 +143,12 @@ def fuse_tsdf_tiled(
     maxs = centers.max(axis=0)
     nx = max(1, int(np.ceil((maxs[0] - mins[0]) / tile_m)))
     ny = max(1, int(np.ceil((maxs[1] - mins[1]) / tile_m)))
+    log.info(
+        "TSDF tiled fusion: %d frames over %.0f x %.0f m -> %d x %d = %d tiles "
+        "(tile_m=%.0f, overlap_m=%.0f, voxel_m=%.3f, depth_trunc=%.0f)",
+        len(centers), maxs[0] - mins[0], maxs[1] - mins[1], nx, ny, nx * ny,
+        tile_m, overlap_m, voxel_m, depth_trunc,
+    )
 
     all_pts: list[np.ndarray] = []
     all_cols: list[np.ndarray] = []
@@ -106,7 +158,23 @@ def fuse_tsdf_tiled(
         for ix in range(nx):
             x0 = mins[0] + ix * tile_m
             y0 = mins[1] + iy * tile_m
-            # frames whose camera center lies within the core cell expanded by the overlap margin
+            # Core cell to crop to (dedup). Boundary cells reach +/-inf so far-field ground beyond the
+            # camera-center span is kept.
+            cx_lo = -np.inf if ix == 0 else x0
+            cx_hi = np.inf if ix == nx - 1 else x0 + tile_m
+            cy_lo = -np.inf if iy == 0 else y0
+            cy_hi = np.inf if iy == ny - 1 else y0 + tile_m
+            # Depth-integration window = core + overlap on interior edges (support for a clean seam),
+            # +/-inf on boundary edges (keep the scene-edge far field). Clipping each depth map to THIS
+            # window is what bounds per-tile memory: a nadir camera's footprint is far wider than a tile,
+            # so without clipping every tile would hash TSDF blocks across the whole scene.
+            ix_lo = -np.inf if ix == 0 else x0 - overlap_m
+            ix_hi = np.inf if ix == nx - 1 else x0 + tile_m + overlap_m
+            iy_lo = -np.inf if iy == 0 else y0 - overlap_m
+            iy_hi = np.inf if iy == ny - 1 else y0 + tile_m + overlap_m
+
+            # Frames that could see into this window: camera center within the window (nadir cameras look
+            # straight down, so the center is the best cheap proxy) expanded by the overlap margin.
             sel = np.where(
                 (centers[:, 0] >= x0 - overlap_m) & (centers[:, 0] < x0 + tile_m + overlap_m)
                 & (centers[:, 1] >= y0 - overlap_m) & (centers[:, 1] < y0 + tile_m + overlap_m)
@@ -123,11 +191,17 @@ def fuse_tsdf_tiled(
                 color_bgr, depth, extr = loaded
                 if depth is None or color_bgr is None:
                     continue
-                _integrate(o3d, vol, intr, color_bgr, depth, extr, depth_trunc)
+                depth_clipped = _clip_depth_to_xy(
+                    depth, fx, fy, cx, cy, extr, ix_lo, ix_hi, iy_lo, iy_hi
+                )
+                if not np.any(depth_clipped > 0):
+                    continue  # this frame sees no ground inside the tile window
+                _integrate(o3d, vol, intr, color_bgr, depth_clipped, extr, depth_trunc)
                 used_idx.add(int(i))
                 n_here += 1
             if n_here == 0:
                 del vol
+                gc.collect()
                 continue
 
             pcd = vol.extract_point_cloud()
@@ -138,16 +212,14 @@ def fuse_tsdf_tiled(
             if len(pts) == 0:
                 continue
 
-            # crop to the core cell so overlapping tiles don't emit duplicate points; boundary
-            # cells reach to +/-inf so far-field ground beyond the camera-center span is kept.
-            x_lo = -np.inf if ix == 0 else x0
-            x_hi = np.inf if ix == nx - 1 else x0 + tile_m
-            y_lo = -np.inf if iy == 0 else y0
-            y_hi = np.inf if iy == ny - 1 else y0 + tile_m
+            # crop to the core cell so overlapping tiles don't emit duplicate points
             keep = (
-                (pts[:, 0] >= x_lo) & (pts[:, 0] < x_hi)
-                & (pts[:, 1] >= y_lo) & (pts[:, 1] < y_hi)
+                (pts[:, 0] >= cx_lo) & (pts[:, 0] < cx_hi)
+                & (pts[:, 1] >= cy_lo) & (pts[:, 1] < cy_hi)
             )
+            n_keep = int(keep.sum())
+            log.info("  tile [%d,%d] %d frames -> %d pts (%d after core-crop)",
+                     ix, iy, n_here, len(pts), n_keep)
             if keep.any():
                 all_pts.append(pts[keep])
                 all_cols.append(cols[keep])

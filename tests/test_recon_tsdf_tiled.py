@@ -145,3 +145,68 @@ def test_tiled_skips_frames_load_returns_none(monkeypatch):
     )
     assert used == 2
     assert len(pts) == 2
+
+
+def _nadir_extr(cx_world, cy_world, height):
+    """world->cam for a nadir camera at (cx_world, cy_world, height) looking straight down (-Z world).
+
+    Camera axes: +Xc = +X world, +Yc = -Y world, +Zc = -Z world (so a positive camera-frame depth maps
+    to a point *below* the camera). extr maps world->cam: p_cam = R (p_world - c).
+    """
+    R = np.array([[1.0, 0.0, 0.0],
+                  [0.0, -1.0, 0.0],
+                  [0.0, 0.0, -1.0]])
+    c = np.array([cx_world, cy_world, height])
+    extr = np.eye(4)
+    extr[:3, :3] = R
+    extr[:3, 3] = -R @ c
+    return extr
+
+
+def test_clip_depth_to_xy_keeps_only_pixels_inside_window():
+    from drishti.recon.tsdf import _clip_depth_to_xy
+
+    # 5x5 nadir view, camera 100 m above world origin, 1 m/px ground sampling at this depth.
+    fx = fy = 100.0
+    cxp = cyp = 2.0  # principal point at pixel (2,2)
+    h = w = 5
+    depth = np.full((h, w), 100.0, dtype=np.float32)  # flat ground 100 m below
+    extr = _nadir_extr(0.0, 0.0, 100.0)
+
+    # Ground XY under each pixel: X = (u-2)/100 * 100 = u-2  in [-2..2]; Y = -(v-2) in [-2..2].
+    # Keep the window [0,3) x [0,3): X in {0,1,2} -> u in {2,3,4}; Y in {0,1,2} -> v in {0,1,2}.
+    out = _clip_depth_to_xy(depth, fx, fy, cxp, cyp, extr,
+                            x_lo=0.0, x_hi=3.0, y_lo=0.0, y_hi=3.0)
+    kept = out > 0
+    expected = np.zeros((h, w), dtype=bool)
+    for v in range(h):
+        for u in range(w):
+            X = (u - cxp)
+            Y = -(v - cyp)
+            expected[v, u] = (0.0 <= X < 3.0) and (0.0 <= Y < 3.0)
+    assert np.array_equal(kept, expected)
+    # kept pixels keep their original depth value; others are zeroed
+    assert np.all(out[kept] == 100.0)
+    assert np.all(out[~kept] == 0.0)
+
+
+def test_clip_depth_to_xy_ignores_invalid_depth():
+    from drishti.recon.tsdf import _clip_depth_to_xy
+
+    fx = fy = 100.0
+    depth = np.zeros((5, 5), dtype=np.float32)  # all invalid
+    extr = _nadir_extr(0.0, 0.0, 100.0)
+    out = _clip_depth_to_xy(depth, fx, fy, 2.0, 2.0, extr,
+                            x_lo=-np.inf, x_hi=np.inf, y_lo=-np.inf, y_hi=np.inf)
+    assert np.all(out == 0.0)  # zero-depth pixels never become valid, even in an infinite window
+
+
+def test_clip_depth_to_xy_infinite_window_is_noop():
+    from drishti.recon.tsdf import _clip_depth_to_xy
+
+    fx = fy = 100.0
+    depth = np.full((5, 5), 100.0, dtype=np.float32)
+    extr = _nadir_extr(50.0, -30.0, 100.0)
+    out = _clip_depth_to_xy(depth, fx, fy, 2.0, 2.0, extr,
+                            x_lo=-np.inf, x_hi=np.inf, y_lo=-np.inf, y_hi=np.inf)
+    assert np.array_equal(out, depth)  # boundary tiles (+/-inf on all sides) drop nothing
