@@ -5,10 +5,34 @@ Real geometry writers used by S7/S8/S10 so basic exports work without Open3D/tri
 """
 from __future__ import annotations
 
-import struct
+import shutil
 from pathlib import Path
 
 import numpy as np
+
+# Packed binary-PLY vertex record (x,y,z float32 + r,g,b uint8) — 15 bytes, no padding. numpy's default
+# (align=False) layout matches struct.pack("<fffBBB", ...) byte-for-byte, so we can serialize a whole
+# chunk with one vectorized ``tobytes()`` instead of a per-point Python loop (catastrophic at 100M+ pts).
+_PLY_RGB_DTYPE = np.dtype(
+    [("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("r", "u1"), ("g", "u1"), ("b", "u1")]
+)
+
+
+def _rgb_to_u8(colors: np.ndarray, n: int) -> np.ndarray:
+    """Normalize an Nx3 color array (float [0,1] or [0,255], or uint8) to uint8, validated against n."""
+    c = np.asarray(colors, dtype=np.float64)
+    if c.ndim != 2 or c.shape != (n, 3):
+        raise ValueError(f"colors must be {n}x3 to match points, got {c.shape}")
+    if c.size and c.max() <= 1.0 + 1e-6:
+        c = c * 255.0
+    return np.clip(c, 0, 255).astype(np.uint8)
+
+
+def _pack_rgb_chunk(pts: np.ndarray, c_u8: np.ndarray) -> bytes:
+    rec = np.empty(len(pts), dtype=_PLY_RGB_DTYPE)
+    rec["x"], rec["y"], rec["z"] = pts[:, 0], pts[:, 1], pts[:, 2]
+    rec["r"], rec["g"], rec["b"] = c_u8[:, 0], c_u8[:, 1], c_u8[:, 2]
+    return rec.tobytes()
 
 
 def write_ply_points(path: str | Path, points: np.ndarray, colors: np.ndarray | None = None) -> None:
@@ -18,11 +42,6 @@ def write_ply_points(path: str | Path, points: np.ndarray, colors: np.ndarray | 
         raise ValueError(f"points must be Nx3, got {pts.shape}")
     n = len(pts)
     has_color = colors is not None and len(colors) == n
-    if has_color:
-        c = np.asarray(colors, dtype=np.float64)
-        if c.max() <= 1.0 + 1e-6:
-            c = c * 255.0
-        c = np.clip(c, 0, 255).astype(np.uint8)
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -34,11 +53,81 @@ def write_ply_points(path: str | Path, points: np.ndarray, colors: np.ndarray | 
     with open(path, "wb") as f:
         f.write(("\n".join(header)).encode("ascii"))
         if has_color:
-            for i in range(n):
-                f.write(struct.pack("<fffBBB", pts[i, 0], pts[i, 1], pts[i, 2],
-                                    c[i, 0], c[i, 1], c[i, 2]))
+            f.write(_pack_rgb_chunk(pts, _rgb_to_u8(colors, n)))  # vectorized, no per-point loop
         else:
             f.write(pts.tobytes())
+
+
+class StreamingPlyWriter:
+    """Append points to a binary PLY incrementally so peak RAM tracks one chunk, not the whole cloud.
+
+    S7 tiled fusion emits the dense cloud tile-by-tile; holding every tile's points to concatenate at the
+    end costs RAM proportional to the *whole* scene (100M+ points on a large aerial capture => OOM, even
+    though each tile fits easily). A binary PLY needs the total vertex count in its header up front, so this
+    writer streams each chunk to a temp body file, tracks the running count and bounding box, and on
+    :meth:`close` writes the real header and copies the body in (disk-to-disk, buffered — RAM-cheap). Use as
+    a context manager: the final PLY is written only on clean exit; an exception discards the temp body.
+    """
+
+    def __init__(self, path: str | Path, with_color: bool = True) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.with_color = with_color
+        self._body_path = self.path.with_suffix(self.path.suffix + ".body.tmp")
+        # Handle intentionally outlives __init__ — it spans many add() calls and is closed in
+        # close()/_discard() (this class *is* the context manager), so an inline `with` can't apply.
+        self._body = open(self._body_path, "wb")  # noqa: SIM115
+        self.count = 0
+        self.bbox_min: np.ndarray | None = None
+        self.bbox_max: np.ndarray | None = None
+
+    def add(self, points: np.ndarray, colors: np.ndarray | None = None) -> None:
+        """Append a chunk (Nx3 points, optional Nx3 colors). Empty chunks are ignored."""
+        pts = np.ascontiguousarray(points, dtype=np.float32)
+        if pts.ndim != 2 or pts.shape[1] != 3:
+            raise ValueError(f"points must be Nx3, got {pts.shape}")
+        n = len(pts)
+        if n == 0:
+            return
+        if self.with_color:
+            self._body.write(_pack_rgb_chunk(pts, _rgb_to_u8(colors, n)))
+        else:
+            self._body.write(pts.tobytes())
+        mn, mx = pts.min(axis=0), pts.max(axis=0)
+        self.bbox_min = mn if self.bbox_min is None else np.minimum(self.bbox_min, mn)
+        self.bbox_max = mx if self.bbox_max is None else np.maximum(self.bbox_max, mx)
+        self.count += n
+
+    def close(self) -> None:
+        """Finalize the PLY: write the header with the final count and stream the body in."""
+        if self._body.closed:
+            return
+        self._body.close()
+        header = ["ply", "format binary_little_endian 1.0", f"element vertex {self.count}",
+                  "property float x", "property float y", "property float z"]
+        if self.with_color:
+            header += ["property uchar red", "property uchar green", "property uchar blue"]
+        header += ["end_header\n"]
+        with open(self.path, "wb") as f:
+            f.write(("\n".join(header)).encode("ascii"))
+            with open(self._body_path, "rb") as b:
+                shutil.copyfileobj(b, f, length=8 * 1024 * 1024)
+        self._body_path.unlink(missing_ok=True)
+
+    def _discard(self) -> None:
+        if not self._body.closed:
+            self._body.close()
+        self._body_path.unlink(missing_ok=True)
+
+    def __enter__(self) -> StreamingPlyWriter:
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        if exc_type is None:
+            self.close()
+        else:
+            self._discard()  # don't leave a truncated/bogus PLY on failure
+        return False
 
 
 def write_obj_mesh(path: str | Path, vertices: np.ndarray, faces: np.ndarray,

@@ -26,7 +26,7 @@ class DenseStage(Stage):
     def run(self, bundle: Bundle, cfg: DrishtiConfig, rt: Runtime) -> StageResult:
         import numpy as np
 
-        from ..io.pointcloud import write_ply_points
+        from ..io.pointcloud import StreamingPlyWriter, write_ply_points
         from ..io.video import read_image
         from ..recon.depthfit import intrinsics_matrix
 
@@ -81,6 +81,7 @@ class DenseStage(Stage):
 
         voxel = cfg.dense.tsdf_voxel_m
         tile = cfg.dense.tile
+        ply = bundle.stage_dir(self.name) / "dense.ply"
         if tile.enabled:
             # Vertical surface envelope from S2's metric sparse points (COLMAP-triangulated true surface,
             # same ground CRS as the poses). Clipping each depth map to this Z band before fusion drops the
@@ -102,32 +103,42 @@ class DenseStage(Stage):
             else:
                 log.warning("s7_dense: vertical Z clip disabled (open band); per-tile RAM bounded by tile_m only")
 
-            # Memory-bounded: fuse one ground tile at a time so peak RAM tracks tile extent, not the
-            # whole aerial scene (a monolithic volume at this voxel size OOM-kills large captures).
-            points, colors, used = fuse_tsdf_tiled(
-                specs, _load, fx, fy, cx, cy, width, height,
-                voxel_m=voxel, sdf_trunc=4.0 * voxel, depth_trunc=cfg.dense.depth_trunc_m,
-                tile_m=tile.tile_m, overlap_m=tile.overlap_m, z_lo=z_lo, z_hi=z_hi,
-            )
+            # Memory-bounded: fuse one ground tile at a time so peak RAM tracks tile extent, not the whole
+            # aerial scene, AND stream each tile's points straight to the PLY on disk (freeing them) so RAM
+            # never holds the full cloud — the ~100M-point accumulation that OOM-killed the whole-scene run.
+            with StreamingPlyWriter(ply, with_color=True) as writer:
+                _, _, used = fuse_tsdf_tiled(
+                    specs, _load, fx, fy, cx, cy, width, height,
+                    voxel_m=voxel, sdf_trunc=4.0 * voxel, depth_trunc=cfg.dense.depth_trunc_m,
+                    tile_m=tile.tile_m, overlap_m=tile.overlap_m, z_lo=z_lo, z_hi=z_hi,
+                    sink=writer.add,
+                )
+            n_points = writer.count
+            if n_points == 0:
+                raise RuntimeError("s7_dense: TSDF produced an empty cloud.")
+            bbox_min = writer.bbox_min.tolist()
+            bbox_max = writer.bbox_max.tolist()
         else:
             points, colors, used = fuse_tsdf(
                 (_load(s) for s in specs), fx, fy, cx, cy, width, height,
                 voxel_m=voxel, sdf_trunc=4.0 * voxel, depth_trunc=cfg.dense.depth_trunc_m,
             )
-        if len(points) == 0:
-            raise RuntimeError("s7_dense: TSDF produced an empty cloud.")
+            if len(points) == 0:
+                raise RuntimeError("s7_dense: TSDF produced an empty cloud.")
+            write_ply_points(ply, points, colors)
+            n_points = int(len(points))
+            bbox_min = points.min(axis=0).tolist()
+            bbox_max = points.max(axis=0).tolist()
 
-        ply = bundle.stage_dir(self.name) / "dense.ply"
-        write_ply_points(ply, points, colors)
         dense_ref = bundle.write_json(f"{self.name}/dense.json", {
             "method": "tsdf", "voxel_m": voxel, "n_frames_fused": used,
-            "n_points": int(len(points)), "cloud": bundle.relpath(ply),
-            "bbox_min": points.min(axis=0).tolist(), "bbox_max": points.max(axis=0).tolist(),
+            "n_points": n_points, "cloud": bundle.relpath(ply),
+            "bbox_min": bbox_min, "bbox_max": bbox_max,
         })
 
         return StageResult(
             outputs={"dense": dense_ref, "cloud": bundle.relpath(ply)},
-            metrics={"n_points": int(len(points)), "n_frames_fused": used,
+            metrics={"n_points": n_points, "n_frames_fused": used,
                      "voxel_m": voxel},
             confidence_summary=round(min(1.0, used / max(1, len(poses_doc["poses"]))), 3),
         )

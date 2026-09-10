@@ -305,3 +305,38 @@ def test_tiled_fusion_threads_z_band_through_clip(monkeypatch):
             voxel_m=0.05, sdf_trunc=0.2, depth_trunc=150.0, tile_m=30.0, overlap_m=8.0,
             z_lo=100.0, z_hi=200.0,
         )
+
+
+def test_tiled_fusion_sink_streams_tiles_and_returns_empty(monkeypatch):
+    """With a sink, fuse_tsdf_tiled must hand every kept point to the sink (freeing per tile) and return
+    empty arrays — the RAM-bounded S7 path — while covering exactly the same points as the accumulating
+    path. This is what keeps peak RAM at one tile instead of the whole (100M+ point) cloud."""
+    from drishti.recon.tsdf import fuse_tsdf_tiled
+
+    _install_fake_open3d(monkeypatch)
+    specs = [_spec(20.0 * i, 20.0 * j) for i in range(5) for j in range(5)]
+    kw = {"fx": 1.0, "fy": 1.0, "cx": 2.0, "cy": 2.0, "width": 4, "height": 4,
+          "voxel_m": 0.05, "sdf_trunc": 0.2, "depth_trunc": 150.0, "tile_m": 30.0, "overlap_m": 8.0}
+
+    # Reference: accumulate-and-return (sink=None).
+    ref_pts, ref_cols, ref_used = fuse_tsdf_tiled(specs, _load, **kw)
+
+    # Streamed: collect via a sink.
+    chunks_pts: list[np.ndarray] = []
+    chunks_cols: list[np.ndarray] = []
+
+    def _sink(pts, cols):
+        chunks_pts.append(np.array(pts))   # copy: the function frees its buffers after the call
+        chunks_cols.append(np.array(cols))
+
+    out_pts, out_cols, used = fuse_tsdf_tiled(specs, _load, sink=_sink, **kw)
+
+    assert used == ref_used == 25
+    assert len(out_pts) == 0 and len(out_cols) == 0     # sink owns the data; nothing accumulated
+    streamed = np.concatenate(chunks_pts, axis=0)
+    assert len(streamed) == len(ref_pts) == 25
+    # Same set of points regardless of tile emission order.
+    ref_xy = {(round(p[0], 3), round(p[1], 3)) for p in ref_pts}
+    got_xy = {(round(p[0], 3), round(p[1], 3)) for p in streamed}
+    assert got_xy == ref_xy
+    assert sum(len(c) for c in chunks_cols) == 25

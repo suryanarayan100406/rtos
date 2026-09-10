@@ -284,7 +284,7 @@ and exit criteria: [`docs/implementation/01-IMPLEMENTATION-PLAN.md`](docs/implem
 
 **What "in progress" means here (honest):** the *code* for all 11 stages (S0–S10 + report) is written
 with real tools and guarded imports — **no stubs, no fake outputs**. The pure logic and core machinery
-are unit-tested (**102 tests passing, ruff clean**; a pre-existing `test_server` collection error —
+are unit-tested (**108 tests passing, ruff clean**; a pre-existing `test_server` collection error —
 the FastAPI `server` package not on this env's `PYTHONPATH` — is unrelated to the pipeline and tracked
 separately). What remains is **end-to-end validation on real
 footage with the heavy extras installed**, which needs the cloud-T4 / Docker environment (no local
@@ -323,7 +323,14 @@ its tile's window before integration (`_clip_depth_to_box`, was `_clip_depth_to_
 slab** that OOM'd inside a single tile, so S7 now derives a **ground Z band from S2's metric sparse points**
 and clips each depth map to it, and the default `tile_m` dropped **60→40 m** — block count ∝
 tile_area × slab_thickness, and these bound both. Voxel and `depth_trunc` untouched; the Z-clip *improves*
-the model (drops far-field flyers no real surface produced). Awaits an end-to-end run for verification.
+the model (drops far-field flyers no real surface produced). Those fixes made every tile *fuse and free*
+individually, exposing a **fourth, final** OOM (§9 2026-09-11 #2): `fuse_tsdf_tiled` still **accumulated
+every tile's points in RAM** to concatenate at the end, so a large scene's ~100 M-point cloud (~5 GB) plus
+the last tile's working volume again crossed 30 GB. Fixed by **streaming each tile's points straight to the
+PLY on disk and freeing them** (new `StreamingPlyWriter` in `io/pointcloud.py`, wired into S7 via an optional
+`sink` on `fuse_tsdf_tiled`) — peak RAM now tracks **one tile**, proven to fit since every tile completed
+individually. Same pass vectorized the PLY color writer (was a per-point Python loop — hours at 100 M pts).
+Awaits an end-to-end run for verification.
 Infrastructure and all stage code are in place and unit-green, and **realistic inputs now
 exist on demand** via `scripts/make_sample_dataset.py` (real OpenDroneMap imagery + real GPS EXIF, or a
 ground-truth synthetic city) — both are **proven on the cloud T4 through S2 SfM and into the neural stages** (S0 ingest with the CRS
@@ -371,6 +378,40 @@ list of what's done vs. remaining directly under this table.
   s7 `n_points`/`n_frames_fused` and peak RAM. *(Agent.)*
 
 Record every decision that a future agent would otherwise have to reverse-engineer. Newest at the top.
+
+- **2026-09-11 (#2) — s7_dense OOM, final layer: per-tile point *accumulation* → stream tiles to disk.**
+  With the XY-clip (fb97c97) and Z-band + `tile_m` 60→40 fixes in, `aukerman` 6B on Kaggle (~30 GB) got
+  **much further** — `notebooks/5.txt` shows the ground Z band derived (`218.5..270.6 m`, 52.1 m thick) and
+  tiles **[0,0] through [2,3] all fusing and freeing individually** (largest logged: tile [2,3] = 7 frames
+  → 14.4 M pts, 10.1 M after core-crop) — then `[exit -9]` at `tile [3,3] integrating`. **This proves the
+  per-tile fix worked** (no single tile blows up; each completes and is freed). **Root cause of the
+  remaining death:** `fuse_tsdf_tiled` appended every tile's kept points to in-memory `all_pts`/`all_cols`
+  and only `np.concatenate`'d at the very end, so RAM grew with the **whole scene** — ~90–100 M points
+  accumulated (~5 GB as float64 xyz+rgb) by tile [3,3], and that plus the tile's own integrate/extract
+  working set again crossed 30 GB. The tiling bounded each tile's *volume*; nothing bounded the *output
+  cloud*. **Fix (io + stage + tests):**
+  (1) `io/pointcloud.py` — new **`StreamingPlyWriter`**: a binary PLY needs its vertex count in the header
+  up front, so it streams each chunk to a temp body file while tracking running count + bbox, then on close
+  writes the real header and copies the body in (disk-to-disk, buffered — RAM-cheap). Context manager:
+  finalizes only on clean exit, discards the temp body on exception (no truncated PLY). Same pass
+  **vectorized** the color writer (`_pack_rgb_chunk` via a packed structured dtype identical to the old
+  `struct.pack("<fffBBB")` bytes) — the previous per-point Python loop would take *hours* at 100 M+ points.
+  (2) `recon/tsdf.py` — `fuse_tsdf_tiled` takes an optional **`sink(points, colors)`** callback; when given,
+  each tile's core-cropped points go to the sink and are freed (no accumulation), and the returned arrays are
+  empty. `sink=None` keeps the accumulate-and-return behaviour the 12 existing tiled tests rely on. Added a
+  per-tile `del pts, cols; gc.collect()`.
+  (3) `stages/s7_dense.py` — the tiled path now fuses **into a `StreamingPlyWriter`** (`sink=writer.add`) and
+  reads `n_points`/`bbox` from the writer; the non-tiled path still writes arrays via `write_ply_points`.
+  Peak RAM now tracks **one tile**, which every tile in 5.txt demonstrably fit. **Voxel stays 5 cm,
+  `depth_trunc` stays 150 m — no quality change; this is purely a memory-layout fix.** **Tests:** +6
+  (`test_pointcloud.py`: streaming matches one-shot byte-for-byte, count/bbox tracking, empty-chunk skip,
+  no-color round-trip, exception-discards-temp; `test_recon_tsdf_tiled.py`: sink receives all points and
+  returns empty, matching the accumulate path) → full suite **108 passing, ruff clean**. **Status /
+  next:** **unverified locally** (no dGPU + insufficient RAM for Open3D fusion). First proof is the next
+  Kaggle run *completing* s7_dense — report `n_points`/`n_frames_fused` and peak RAM. **Heads-up for the
+  next failure:** the dense cloud is very large (~100–130 M points; monocular-depth "fog" filling the 52 m
+  band at full 4K resolution), so **S8 Poisson meshing may be the next memory pressure point** — not
+  pre-optimized here (avoid over-engineering an unseen failure), but the likely next stop. *(Agent.)*
 
 - **2026-09-11 — s7_dense OOM finally bounded: vertical Z-band depth clip (from sparse points) + `tile_m` 60→40.**
   After the XY-clip fix (fb97c97), `aukerman` 6B still `[exit -9]`'d on Kaggle **inside the first tile**

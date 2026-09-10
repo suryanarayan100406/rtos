@@ -152,6 +152,7 @@ def fuse_tsdf_tiled(
     voxel_m: float, sdf_trunc: float, depth_trunc: float,
     tile_m: float, overlap_m: float,
     z_lo: float = -np.inf, z_hi: float = np.inf,
+    sink: Callable[[np.ndarray, np.ndarray], None] | None = None,
 ):
     """Memory-bounded TSDF fusion by spatial tiling of the ground footprint.
 
@@ -167,8 +168,17 @@ def fuse_tsdf_tiled(
     +/-inf in XY so nothing is dropped at the scene edge; ``z_lo``/``z_hi`` default to an open band
     (no vertical clipping) when the caller cannot supply a surface envelope.
 
+    Memory: each tile's volume is freed before the next, so peak RAM tracks a single tile — *except* that
+    accumulating every tile's extracted points to concatenate at the end costs RAM proportional to the
+    whole cloud (100M+ points on a large aerial scene => OOM). Pass ``sink`` to avoid that: it is called
+    ``sink(points, colors)`` once per non-empty tile with that tile's core-cropped points, which are then
+    freed instead of retained (e.g. a :class:`~drishti.io.pointcloud.StreamingPlyWriter` that streams them
+    to disk). With a sink the returned point/color arrays are empty (the sink owns the data); with
+    ``sink=None`` the points are accumulated and returned in full (convenient for small clouds and tests).
+
     Returns (points Nx3 float64, colors Nx3 float64 in [0,1], n_frames_used) — ``n_frames_used`` is the
-    count of distinct frames integrated into at least one tile.
+    count of distinct frames integrated into at least one tile. ``points``/``colors`` are empty when a
+    ``sink`` consumed the tiles.
     """
     o3d = require("open3d", purpose="TSDF fusion")
     if tile_m <= 0.0:
@@ -264,8 +274,15 @@ def fuse_tsdf_tiled(
             log.info("  tile [%d,%d] fused %d frames -> %d pts (%d after core-crop)",
                      ix, iy, n_here, len(pts), n_keep)
             if keep.any():
-                all_pts.append(pts[keep])
-                all_cols.append(cols[keep])
+                if sink is not None:
+                    # Stream this tile's points to the sink and free them: peak RAM tracks one tile,
+                    # not the whole (100M+ point) cloud. The sink owns the data from here.
+                    sink(pts[keep], cols[keep])
+                else:
+                    all_pts.append(pts[keep])
+                    all_cols.append(cols[keep])
+            del pts, cols
+            gc.collect()
 
     if not used_idx:
         raise RuntimeError("TSDF fusion integrated 0 frames (no valid depth).")
