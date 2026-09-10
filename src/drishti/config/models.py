@@ -117,7 +117,7 @@ class GaussianCfg(_Base):
 
 class TileCfg(_Base):
     enabled: bool = True
-    tile_m: float = 60.0
+    tile_m: float = 40.0
     overlap_m: float = 8.0
 
 
@@ -125,6 +125,10 @@ class DenseCfg(_Base):
     method: Literal["tsdf", "gaussian"] = "tsdf"
     tsdf_voxel_m: float = 0.05
     depth_trunc_m: float = 100.0  # ignore depth beyond this (unreliable far field)
+    # Vertical margin added to the sparse-point surface envelope when clipping depth in S7 tiled fusion.
+    # Big enough to keep real structure + depth noise at the true surface; small enough to drop far-field
+    # monocular flyers that otherwise inflate per-tile RAM. Set huge to effectively disable the Z clip.
+    ground_band_margin_m: float = 12.0
     gaussian: GaussianCfg = Field(default_factory=GaussianCfg)
     tile: TileCfg = Field(default_factory=TileCfg)
 

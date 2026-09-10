@@ -284,7 +284,9 @@ and exit criteria: [`docs/implementation/01-IMPLEMENTATION-PLAN.md`](docs/implem
 
 **What "in progress" means here (honest):** the *code* for all 11 stages (S0–S10 + report) is written
 with real tools and guarded imports — **no stubs, no fake outputs**. The pure logic and core machinery
-are unit-tested (**98 tests passing, ruff clean**). What remains is **end-to-end validation on real
+are unit-tested (**102 tests passing, ruff clean**; a pre-existing `test_server` collection error —
+the FastAPI `server` package not on this env's `PYTHONPATH` — is unrelated to the pipeline and tracked
+separately). What remains is **end-to-end validation on real
 footage with the heavy extras installed**, which needs the cloud-T4 / Docker environment (no local
 dGPU on the dev machine). Until a full run over real drone video is measured, these phases are not
 marked done.
@@ -313,7 +315,15 @@ then **OOM-killed (`exit -9`) at s7_dense even on Kaggle's ~30 GB** — root-cau
 stage built one monolithic `ScalableTSDFVolume` over the whole aerial scene and never used the `dense.tile`
 config that already existed to bound it.** Fixed in stage code (`recon/tsdf.py` + `stages/s7_dense.py`, see
 §9 2026-09-10 #2): `fuse_tsdf_tiled` fuses one ground tile at a time so peak RAM tracks tile extent, not
-scene size — voxel stays 5 cm, `depth_trunc` stays 150 m. Awaits an end-to-end run for verification.
+scene size — voxel stays 5 cm, `depth_trunc` stays 150 m. That fix then needed **two follow-ons** for
+real nadir aerial capture, both proven necessary by successive Kaggle OOM logs (§9 2026-09-11): **(a)** a
+camera ~100 m AGL sees a ground footprint far wider than a tile, so each depth map is now XY-clipped to
+its tile's window before integration (`_clip_depth_to_box`, was `_clip_depth_to_xy`, commit fb97c97);
+**(b)** noisy monocular depth over a 150 m truncation still scattered points across a thick **vertical
+slab** that OOM'd inside a single tile, so S7 now derives a **ground Z band from S2's metric sparse points**
+and clips each depth map to it, and the default `tile_m` dropped **60→40 m** — block count ∝
+tile_area × slab_thickness, and these bound both. Voxel and `depth_trunc` untouched; the Z-clip *improves*
+the model (drops far-field flyers no real surface produced). Awaits an end-to-end run for verification.
 Infrastructure and all stage code are in place and unit-green, and **realistic inputs now
 exist on demand** via `scripts/make_sample_dataset.py` (real OpenDroneMap imagery + real GPS EXIF, or a
 ground-truth synthetic city) — both are **proven on the cloud T4 through S2 SfM and into the neural stages** (S0 ingest with the CRS
@@ -362,6 +372,44 @@ list of what's done vs. remaining directly under this table.
 
 Record every decision that a future agent would otherwise have to reverse-engineer. Newest at the top.
 
+- **2026-09-11 — s7_dense OOM finally bounded: vertical Z-band depth clip (from sparse points) + `tile_m` 60→40.**
+  After the XY-clip fix (fb97c97), `aukerman` 6B still `[exit -9]`'d on Kaggle **inside the first tile**
+  (`notebooks/4.txt`: `TSDF tiled fusion: 75 frames over 297 x 160 m -> 15 tiles (tile_m=60 … depth_trunc=150)`
+  then exit with **no `tile [0,0]` line** — death during that tile's integrate/extract). **Root cause:** the
+  XY clip bounds a tile horizontally (~68×68 m) but not vertically. Monocular depth (Depth Anything V2, made
+  metric by a per-frame scale+shift fit) is noisy, and at `depth_trunc=150` the unreliable far field scatters
+  back-projected points across a thick **vertical Z slab** (~12–25 m). A `ScalableTSDFVolume` allocates 16³
+  blocks wherever the surface passes, so a thick slab across every ground column explodes block count — one
+  76×76 m tile alone needs ~9–18 GB (before Open3D's ~2× transient during integrate/extract) → OOM. Block
+  count ∝ **tile_area × slab_thickness**; the earlier fixes bounded only area's horizontal half.
+  **Fix (stage code, config, tests):**
+  (1) `recon/tsdf.py` — `_clip_depth_to_xy` → **`_clip_depth_to_box`** with optional `z_lo`/`z_hi`, masking
+  back-projected world-Z; new pure helper **`robust_z_band(z, margin)`** (trimmed `[p1,p99]` ± margin, opens
+  to `(-inf,inf)` on empty/all-invalid — fail-soft, never delete geometry we can't bound); `fuse_tsdf_tiled`
+  takes `z_lo`/`z_hi` (default open) and now logs the z-band and a **per-tile "integrating…" line before
+  integration** so a future OOM is attributable to a specific tile.
+  (2) `stages/s7_dense.py` — loads `s2_poses/sparse_points.json` (COLMAP-triangulated metric surface, same
+  ground CRS as the poses), computes the band from its Z via `robust_z_band(margin=cfg.dense.ground_band_margin_m)`,
+  logs it, threads it into `fuse_tsdf_tiled`. Fail-soft to an open band (logged) if sparse points are
+  missing/degenerate.
+  (3) config — new `DenseCfg.ground_band_margin_m=12.0` (keeps real structure + surface noise, drops
+  far-field flyers; config-driven per §5); `TileCfg.tile_m` default **60→40** (the value the notebook already
+  recommended on OOM — now the default so aerial runs work without a manual `--set`). `configs/default.yaml`
+  updated to match.
+  **Why this is a quality gain, not a loss:** sparse points bracket the true ground+structure envelope, so
+  only depth *no real geometry supported* (gross flyers tens of metres above roofs / below ground) is
+  discarded. Voxel stays **5 cm**, `depth_trunc` stays **150 m** — no resolution or coverage change.
+  **On the recurring GPU suggestion (host RAM full, VRAM idle):** Open3D's legacy `ScalableTSDFVolume` is
+  CPU-only; the GPU path is `open3d.t.geometry.VoxelBlockGrid` (CUDA), a substantial rewrite. It is **not**
+  the fix here: the T4 has **15 GB VRAM < the ~30 GB host**, so an unbounded slab OOMs the GPU *sooner*.
+  Bounding the slab (this change) is the prerequisite regardless of device; VoxelBlockGrid stays a possible
+  future speedup once memory is bounded, not a shortcut around it. **Tests:** 12 in
+  `test_recon_tsdf_tiled.py` (added Z-band keep/drop-flyer clip tests, `robust_z_band` trim/empty tests, and
+  a tiled-fusion test proving `z_lo`/`z_hi` are threaded into the per-frame clip); full suite **102 passing,
+  ruff clean**. **Status:** memory ceiling and seam quality on real `aukerman` still **unverified locally**
+  (Intel Ultra 7 155H, no dGPU, insufficient RAM to run Open3D fusion) — first proof is the next Kaggle
+  run's **per-tile log**, which will now show each tile's frame/point counts and pinpoint any remaining OOM.
+  *(Agent.)*
 - **2026-09-10 — Fragmented/floating-block mesh root-caused to TWO independent bugs; Colab §6 rewritten.**
   The `aukerman` full run (`runs/colab-free-20260909-152600`) produced a smeared mesh of floating blocks
   with DSM coverage **0.003** — not a viewer artifact, a reconstruction failure. Two independent root causes,

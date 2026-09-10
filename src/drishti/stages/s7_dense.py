@@ -36,7 +36,10 @@ class DenseStage(Stage):
                 "the shipped dense path is TSDF (set dense.method=tsdf)."
             )
 
-        from ..recon.tsdf import fuse_tsdf, fuse_tsdf_tiled
+        from ..logging import get_logger
+        from ..recon.tsdf import fuse_tsdf, fuse_tsdf_tiled, robust_z_band
+
+        log = get_logger("drishti.s7_dense")
 
         poses_doc = bundle.read_json("s6_global/poses_global.json")
         depth_doc = bundle.read_json("s4_depth/depth.json")
@@ -79,12 +82,32 @@ class DenseStage(Stage):
         voxel = cfg.dense.tsdf_voxel_m
         tile = cfg.dense.tile
         if tile.enabled:
+            # Vertical surface envelope from S2's metric sparse points (COLMAP-triangulated true surface,
+            # same ground CRS as the poses). Clipping each depth map to this Z band before fusion drops the
+            # gross far-field flyers that noisy monocular depth scatters across a thick vertical slab — the
+            # real per-tile RAM driver — while keeping all depth the sparse geometry actually supports.
+            # Fail-soft: if sparse points are missing/degenerate the band is open (no vertical clip).
+            z_lo, z_hi = -float("inf"), float("inf")
+            try:
+                sparse = np.asarray(
+                    bundle.read_json("s2_poses/sparse_points.json")["points"], dtype=float
+                )
+                if sparse.ndim == 2 and sparse.shape[0] >= 2 and sparse.shape[1] >= 3:
+                    z_lo, z_hi = robust_z_band(sparse[:, 2], margin_m=cfg.dense.ground_band_margin_m)
+            except (FileNotFoundError, KeyError, ValueError) as e:
+                log.warning("s7_dense: no usable sparse points for Z band (%s); vertical clip disabled", e)
+            if np.isfinite(z_lo) and np.isfinite(z_hi):
+                log.info("s7_dense: ground Z band %.1f..%.1f m (%.1f m, margin=%.1f m) from %d sparse pts",
+                         z_lo, z_hi, z_hi - z_lo, cfg.dense.ground_band_margin_m, len(sparse))
+            else:
+                log.warning("s7_dense: vertical Z clip disabled (open band); per-tile RAM bounded by tile_m only")
+
             # Memory-bounded: fuse one ground tile at a time so peak RAM tracks tile extent, not the
             # whole aerial scene (a monolithic volume at this voxel size OOM-kills large captures).
             points, colors, used = fuse_tsdf_tiled(
                 specs, _load, fx, fy, cx, cy, width, height,
                 voxel_m=voxel, sdf_trunc=4.0 * voxel, depth_trunc=cfg.dense.depth_trunc_m,
-                tile_m=tile.tile_m, overlap_m=tile.overlap_m,
+                tile_m=tile.tile_m, overlap_m=tile.overlap_m, z_lo=z_lo, z_hi=z_hi,
             )
         else:
             points, colors, used = fuse_tsdf(

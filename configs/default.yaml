@@ -77,13 +77,14 @@ dense:                    # S7
   method: tsdf            # tsdf (Open3D) | gaussian (gsplat few-shot 3DGS)
   tsdf_voxel_m: 0.05
   depth_trunc_m: 100.0    # ignore depth beyond this (unreliable far field)
+  ground_band_margin_m: 12.0  # vertical margin on the sparse-point surface envelope for S7 Z-clip
   gaussian:
     iters: 7000
     sh_degree: 2
     regularize: [depth, normal, confidence]
   tile:
-    enabled: true         # tile large scenes to fit 16 GB VRAM
-    tile_m: 60.0
+    enabled: true         # tile large scenes to bound host RAM (per-tile TSDF volume, freed between tiles)
+    tile_m: 40.0          # smaller tile = lower peak RAM; combines with the Z-clip to bound per-tile blocks
     overlap_m: 8.0
 
 mesh:                     # S8
