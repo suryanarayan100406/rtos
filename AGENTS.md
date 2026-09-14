@@ -341,7 +341,9 @@ the *meshing input* to the octree-leaf size (auto from depth+extent, clamped ≥
 Voxel/`depth_trunc` for the dense product unchanged. Awaits an end-to-end run for verification.
 Infrastructure and all stage code are in place and unit-green, and **realistic inputs now
 exist on demand** via `scripts/make_sample_dataset.py` (real OpenDroneMap imagery + real GPS EXIF, or a
-ground-truth synthetic city) — both are **proven on the cloud T4 through S2 SfM and into the neural stages** (S0 ingest with the CRS
+ground-truth synthetic city for accuracy checks). The real registry now includes **`waterbury`** — a real
+geotagged **town** survey (248 imgs → ~124 s @2 fps) with far **more buildings** than aukerman's house+barn
+(§9 2026-09-14 #6) — both are **proven on the cloud T4 through S2 SfM and into the neural stages** (S0 ingest with the CRS
 derived from the real track, not hardcoded; S1 frame-QA; S2 COLMAP registered **all 18** brighton_beach
 frames to a kept reconstruction — "degraded" there only reflects the logged GTSAM-skip). Three real
 drifts surfaced on that run and are now fixed: two pycolmap-4.3 API changes (§9: `image_list`→`image_names`,
@@ -369,6 +371,28 @@ list of what's done vs. remaining directly under this table.
 
 ## 9. Decision log (append-only)
 
+- **2026-09-14 (#6) — new REAL dataset `waterbury` (a town with many buildings, ~124 s video).** Adds
+  `waterbury` to the real `REGISTRY` in `scripts/make_sample_dataset.py`
+  (`OpenDroneMap/odm_data_waterbury`, ~1.9 GB, 248 geotagged JPGs), a committed first-class descriptor
+  `configs/datasets/waterbury.yaml` (byte-identical to what the script regenerates, so no 1.9 GB local
+  download was needed to add it), and makes it the **default** in notebook §5 **Option D**. This is the
+  answer to "a new dataset like aukerman but a longer (~1 min) video with more buildings": a real
+  geotagged aerial survey of **Waterbury, VT** — verified real pixels + real GPS EXIF across the whole
+  flight (6/6 sampled frames geotagged; lat ≈ 44.341, lon ≈ −72.749, alt 257–298 m; capture times
+  17:43 → 18:00 = a real ~17-min survey), a suburban **town** with residential + commercial buildings,
+  clearly **more/varied buildings** than aukerman's house+barn. 248 imgs → **~124 s @2 fps**; the real
+  path streams frames + downscales to 1600 px, so the large source imagery does not OOM. It is the
+  **heaviest** set (~1.9 GB) and flies ~100–130 m AGL → run the **6B** depth block (150 m truncation) on
+  Kaggle ~30 GB, like aukerman. **Why real, not synthetic:** an earlier attempt this date built a
+  procedural `synthetic_metropolis` city (~62 buildings) to hit "more buildings + ~1 min"; the user
+  rejected it — *"make it use realistic video footage, not 3d generated"* — so it was **reverted and
+  removed** (its descriptor, its `data/` dir, and the `make_synthetic` `--blocks/--seconds/--alt`
+  parameterization were all backed out; the generator is restored to its original ~19-building village for
+  smoke tests). Real footage can't have buildings *added*, so `waterbury` was chosen by auditing all 19
+  ODM sets: `langley` looked building-dense but has **no GPS EXIF** (ruled out — the real path requires
+  per-image GPS), whereas `waterbury` verified as the best real set carrying **both** dense buildings and
+  GPS. Files touched: `REGISTRY` +1 line, `configs/datasets/waterbury.yaml`, notebook Option D, this log —
+  no pipeline/stage code changed.
 - **2026-09-14 (#5) — notebook gains Option E: upload your own data and run it, with NO repo commit.**
   `notebooks/drishti_colab_full.ipynb` §5 (Import) now has an **Option E** cell (+ intro) that lets a user
   run the full 11-stage pipeline on **their own** footage without committing anything. It is an upload form

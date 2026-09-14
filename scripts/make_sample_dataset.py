@@ -60,6 +60,7 @@ REGISTRY: dict[str, RealSet] = {
     "brighton_beach": RealSet("pierotofy/drone_dataset_brighton_beach", 62, "Beachfront, 18 imgs - smallest georeferenced set (fast)."),
     "caliterra":      RealSet("OpenDroneMap/odm_data_caliterra", 272, "Rolling terrain + a few structures."),
     "lewis":          RealSet("OpenDroneMap/odm_data_lewis", 610, "Larger survey, 145 imgs."),
+    "waterbury":      RealSet("OpenDroneMap/odm_data_waterbury", 1872, "Town (Waterbury, VT): residential + commercial BUILDINGS, 248 geotagged imgs -> ~124s @2fps. Heaviest set (~1.9 GB)."),
 }
 
 
