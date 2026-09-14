@@ -355,7 +355,12 @@ local. Use `--dataset aukerman` for real **buildings** (~543 MB, best fetched on
 happens) — to replace design-target numbers with **measured** accuracy/timing and surface any real
 degradation, then mark the stage phases done. A code-accurate usage+internals guide lives at
 [`docs/GUIDE.md`](docs/GUIDE.md); a known cleanup is the three "probe-only" honesty gaps (S2 GTSAM / S6
-GLOMAP / S9 PDAL) logged in §9.
+GLOMAP / S9 PDAL) logged in §9. Separately, on the **deliverable-viewing** side, the finished `aukerman`
+bundle's display `model.glb` was **regenerated at full precision** (recentered to a local origin before the
+float32 cast — fixes the UTM float32 stair-stepping) and its local `viewer.html` upgraded (IBL + tone
+mapping); `docs/RUN_GUIDE.md` now carries a cell-by-cell **Kaggle reproduce** walkthrough (§9 2026-09-11 #4); the
+same notebook also has an **Option E** import cell to run the pipeline on **your own** footage with no repo
+commit (§9 2026-09-14 #5; RUN_GUIDE §6.6).
 
 **Legend:** ☐ not started · ◐ in progress · ☑ done. When a phase is in progress, add a short bullet
 list of what's done vs. remaining directly under this table.
@@ -363,6 +368,45 @@ list of what's done vs. remaining directly under this table.
 ---
 
 ## 9. Decision log (append-only)
+
+- **2026-09-14 (#5) — notebook gains Option E: upload your own data and run it, with NO repo commit.**
+  `notebooks/drishti_colab_full.ipynb` §5 (Import) now has an **Option E** cell (+ intro) that lets a user
+  run the full 11-stage pipeline on **their own** footage without committing anything. It is an upload form
+  for **every** input: required **video + telemetry**, optional **imu/baro/intrinsics/rtk**, and surveyed
+  **check-points** — each field takes `"upload"` (Colab file picker), an explicit path (used in place;
+  Kaggle: ＋ Add Input → Upload → `/kaggle/input/…`), or `""` to skip an optional. Telemetry format
+  (`dji_srt|csv|mavlink|exif` + CSV column map), CRS (`derive_from_gps|epsg`), and ingest knobs
+  (`target_fps/max_frames/time_offset_s`) are all set in the cell. **No commit by construction:** uploads
+  stage under git-ignored `data/<name>/`, the descriptor is generated at `data/<name>/<name>.yaml` (also
+  ignored), and large files are referenced **in place by absolute path** (CWD-independent, not copied). The
+  cell **validates the generated descriptor against the real `load_dataset` / `DatasetDescriptor` contract
+  before any GPU time**, then exports `MISSION` + `DRISHTI__ingest__*` env overrides so the run cell (§6)
+  works **unchanged**. RUN_GUIDE gains §6.6. **Notebook + docs only — no pipeline, stage, or config code
+  changed.** Verified: the cell byte-compiles, and descriptors built exactly as the cell builds them pass
+  `load_dataset` across dji_srt (all-optional-none, derive-CRS), csv (column map + intrinsics +
+  check-points), and mavlink (epsg 32617 override + rtk + imu).
+
+- **2026-09-11 (#4) — display `model.glb` recentered to fix float32/UTM precision; RUN_GUIDE gains a
+  cell-by-cell Kaggle reproduce section + a viewer precision note.** The local 3D viewer
+  (`runs/<id>/s10_export/viewer.html`) rendered the finished `aukerman` mesh with visible stair-stepping
+  that looked like "low quality." **Root cause is data, not rendering:** glTF POSITION accessors are
+  **float32**, but the mesh is georeferenced in **UTM** (northing ~4.57e6); at that magnitude float32
+  quantizes to ~**0.5 m** steps, baked into the file. **Fix:** regenerate `model.glb` from the
+  full-precision (float64) `s8_mesh/mesh.ply`, **recentering to a local origin *before* the float32 cast**
+  (`runs/colab-full-20260910-212357/_reexport_hq.py`) — coords now sit within ±220 m of zero → float32 step
+  ~**0.015 mm** (verified by parsing the glb POSITION accessor min/max). The exact UTM offset is written to
+  `model.glb.README.txt` (E 437021.187, N 4572795.289, h 248.322) to recover georeferenced coordinates;
+  the `.gltf`/`.obj`/`.ply`/`.las`/`.tif` exports are left **in UTM** (the ones for GIS/measurement). Same
+  pass baked real vertex **normals** (trimesh export needs `scipy`) and upgraded `viewer.html` rendering
+  (image-based lighting via `RoomEnvironment` + `PMREMGenerator`, ACES filmic tone mapping, lit
+  `MeshStandardMaterial` default with vertex colors). Also added **`docs/RUN_GUIDE.md` §6.5** — a
+  cell-by-cell walkthrough of `notebooks/drishti_colab_full.ipynb` **Block 6B** (the exact run that produced
+  the `colab-full-20260910-212357` bundle) — plus a §8 precision explainer. Then built a **unified results
+  page** (`runs/<id>/index.html` + `view_all.cmd`) — one page for the whole run: KPIs, the embedded 3D
+  viewer, the ortho/DSM/DTM maps (pre-rendered to `previews/*.png` because browsers can't display GeoTIFF;
+  DSM ≈227–270 m, DTM ≈226–270 m), the per-stage table read **live** from `report.json`, and a deliverables
+  list that probes which files are on disk vs. still in the bundle zip. **Viewer/docs only — no pipeline or
+  stage code changed.** *(Agent.)*
 
 - **2026-09-10 (#2) — s7_dense OOM (`exit -9`) on Kaggle root-caused + fixed with spatial TSDF tiling.**
   The corrected 6B run (exhaustive matcher, `depth_trunc=150`, voxel 5 cm) advanced past S2/S3/S4/S6 and

@@ -390,6 +390,100 @@ drishti run -d configs/datasets/<mission>.yaml --upto s0_ingest
 drishti inspect runs/<run_id>          # check the derived CRS + telemetry coverage
 ```
 
+### 6.5 Reproduce **this exact model** yourself on a free cloud GPU (Kaggle, cell by cell)
+
+The `aukerman` model in this repo wasn't hand-built — it came out of **one notebook,
+`notebooks/drishti_colab_full.ipynb`, run top-to-bottom on a free Kaggle T4**. Below is that same run so
+you can produce the bundle yourself (or run your own footage the identical way). Nothing here is faked: it
+clones the real repo, installs the real stack, and runs the real `drishti` CLI — a missing dependency or a
+bad input **fails loudly**.
+
+> **Why Kaggle, not Colab's free tier?** The dense stage (S7) integrates depth out to `depth_trunc_m=150`
+> at a **5 cm** voxel, and that working set needs **~30 GB RAM**. Kaggle's free tier gives ~30 GB; Colab's
+> free tier gives ~13 GB and gets OOM-killed at S7. So use a **free Kaggle T4**, or a Colab **High-RAM**
+> runtime. (Everything runs on the GPU; your own machine only *views* the result — no heavy deps needed.)
+
+Run the notebook cells in order. What each does, and the one decision in each:
+
+| Notebook § | Cell | What you do / what it does |
+|-----------|------|----------------------------|
+| **0** | `!nvidia-smi` | Kaggle: *New Notebook → Settings → Accelerator = **GPU T4 ×2**, Internet = **On*** (needed to clone + fetch model checkpoints). This cell must show a Tesla T4 — if not, fix the accelerator before spending time. |
+| **1** | code | **Set `REPO_URL`** to your DRISHTI git URL (and `REPO_REF` to a branch/commit). Runs a clone into `/kaggle/working/drishti` and hard-resets to the latest commit (so a stale checkout can't silently resurrect a fixed bug). |
+| **2** | code | **Install — just run it.** Because Kaggle is on Python 3.13 and Open3D ships no 3.13 wheel, the cell auto-builds an **isolated Python 3.12 env with `uv`**, installs core **first** (so the CLI always lands), then every extra, then the two gap packages (`transformers`, `laspy`). Ends with an `OK`/`MISSING` probe — everything should read **OK**. |
+| **3** | code | *(optional)* Fetches portable **Blender 4.2** so the FBX deliverable is real. Skip it → FBX is recorded *skipped* (S10 **degraded**, not failed); every other format still exports. |
+| **4** | `!drishti doctor` | **The honest gate.** Expect **cuda: yes** and every stage **ready**. Anything still `blocked` here *will* fail when reached — fix it before running. |
+| **5** | Option **D** | **Set `DATASET = "aukerman"`** and run the Option-D cell. It calls `make_sample_dataset.py --dataset aukerman` (fetches ~543 MB of real, GPS-tagged aerial imagery), writes `configs/datasets/aukerman.yaml`, and sets `MISSION`. *(Options A/B = your own video; C = resume a partial bundle.)* |
+| **6** | Block **6B** | **Run Block 6B** (the high-RAM one) — **not 6A.** It executes exactly the command below and tees the whole console to `logs/run_console.log`. |
+| **7** | inspect/verify | `!drishti inspect "$BUNDLE"` + `!drishti verify "$BUNDLE"` — the per-stage truth table and a hash check of every output. |
+| **8–9** | logs / export | Prints the report summary, then zips **full** (everything, reproducible) and **slim** (deliverables + report + logs + manifest). On Kaggle, grab `<run_id>_full.zip` from the file browser on the right (`/kaggle/working`). |
+
+The one command that does the real work (Block 6B, verbatim):
+
+```bash
+drishti run --dataset <MISSION> --profile balanced --run-id colab-full-<timestamp> \
+  --set poses.matcher=exhaustive \
+  --set dense.depth_trunc_m=150
+```
+
+> **Those two `--set` flags are the whole story of a good aerial model — and both are forced by the data,
+> not by taste:**
+> - **`poses.matcher=exhaustive`** — lawnmower strips only loop-close under all-pairs matching; the default
+>   `sequential` links only consecutive frames, so the trajectory drifts and the mesh smears. Measured on
+>   aukerman: fit RMSE **26.3 → 6.5 m**, sparse points **15.9k → 34.9k**, **75/75** frames registered.
+> - **`dense.depth_trunc_m=150`** — the cameras fly ~100–130 m AGL, so the ground sits ~100 m away; the
+>   clamp must clear that (≈ 1.3× max AGL) or S7 **deletes the ground** and you get floating fragments.
+>
+> **If Block 6B dies with `[exit -9]`** (the OS OOM-killing S7, not a DRISHTI error): dense fusion is
+> spatially **tiled**, so shrink the tile — add `--set dense.tile.tile_m=40` (more, smaller tiles = lower
+> peak RAM). Voxel and `depth_trunc` stay put — **no resolution loss.** Do **not** fall back to 6A; its
+> 40 m clamp deletes the ground. Completed stages are cached, so set `RESUME_BUNDLE = BUNDLE` and re-run.
+
+The `<run_id>_full.zip` you download is exactly the shape of the `colab-full-20260910-212357` bundle in
+this repo. Round-trip it back to your machine and you only *view* it (§8):
+
+```bash
+# on your machine — no GPU/heavy deps needed, just unzip and look
+tar -xf colab-full-<timestamp>_full.zip -C runs/     # or: Expand-Archive in PowerShell
+drishti inspect runs/colab-full-<timestamp>          # same manifest you saw on Kaggle
+drishti verify  runs/colab-full-<timestamp>          # confirm the download is intact
+#   then view it with §8 below (viewer.html / view_model.cmd)
+```
+
+### 6.6 Run it on YOUR OWN footage — no repo commit (notebook Option E)
+
+Everything above reproduces the **aukerman** model. To run the same pipeline on **your own** recording —
+without committing anything to the repo — use **Option E** in the notebook
+(`notebooks/drishti_colab_full.ipynb`, §5 "Import"). It is an upload form for **every** input DRISHTI can
+take, and it writes the dataset descriptor for you.
+
+**What you provide** (one cell, top of Option E):
+
+| Input | Required? | How to give it |
+|-------|-----------|----------------|
+| **video** | yes | `"upload"` → file picker (Colab), or a path to a file already on the machine |
+| **telemetry** | yes | same; set `TELE_FORMAT` = `dji_srt` \| `csv` \| `mavlink` \| `exif` (CSV also takes a column map) |
+| **imu / baro / intrinsics / rtk** | optional | `"upload"` to add one, or leave `""` to skip it |
+| **check-points** | optional | surveyed control for a real accuracy check; else the report stays UNVALIDATED |
+
+You also set the CRS (`derive_from_gps` or an explicit `epsg`) and the ingest knobs
+(`TARGET_FPS`, `MAX_FRAMES`, `TIME_OFFSET_S`) right in the cell.
+
+**Why there is no commit.** The cell stages your uploads under `data/<name>/` and writes the descriptor to
+`data/<name>/<name>.yaml` there — a path already covered by `.gitignore` (`data/*` + every media
+extension), so nothing you upload or generate is ever tracked by git. Large files are referenced **in place
+by absolute path**, so they are not copied and the descriptor works regardless of the working directory.
+The cell then validates that descriptor against the real `load_dataset` contract **before** any GPU time,
+and exports `MISSION` (plus `DRISHTI__ingest__*` env overrides for the knobs) so the run cell (§6) works
+**unchanged** — just run it.
+
+- **Colab:** `"upload"` opens a picker; or mount Drive and pass a `/content/drive/...` path.
+- **Kaggle:** there is no pop-up picker — use **＋ Add Input → Upload** and pass the
+  `/kaggle/input/<your-dataset>/<file>` path (or drag into `/kaggle/working` and pass that path). The cell
+  prints these exact instructions if a required upload is missing.
+
+The output bundle has the identical shape to `colab-full-20260910-212357`; round-trip and view it exactly
+as above.
+
 ---
 
 ## 7. Watch it, and read the outputs honestly
@@ -442,7 +536,23 @@ hidden.
 
 ## 8. View and share the finished model
 
-### 8.1 The local web viewer (in this repo, no upload)
+### 8.0 The whole run on one page (results dashboard)
+
+For a single view of *everything the run produced*, the bundle root ships an **`index.html`** results page
+and a **`view_all.cmd`** launcher:
+
+- **Double-click `view_all.cmd`** (in `runs/<run_id>/`) — it serves the bundle root and opens `index.html`,
+  which shows, on one page: the **KPIs** (runtime, stage pass/degrade counts, GPS-fit RMSE, dense-point and
+  mesh counts, CRS), the **3D model** (the viewer below, embedded), the **orthophoto / DSM / DTM** maps
+  (click to enlarge), the **per-stage table** read live from `report.json` (status, environment, time,
+  measured confidence, degradation reason), and a **deliverables** list that links each file present on disk
+  and flags the rest as living in the bundle zip.
+
+It reads the real numbers from `report.json` at load time — nothing is hardcoded — so it stays truthful to
+the run. (The DSM/DTM/ortho thumbnails are pre-rendered PNGs in `previews/`, since browsers can't display
+GeoTIFF directly.)
+
+### 8.1 The local web viewer (3D model only, in this repo, no upload)
 
 The finished GLB ships next to a self-contained viewer. In the export folder
 (`runs/<run_id>/s10_export/`):
@@ -454,6 +564,15 @@ The finished GLB ships next to a self-contained viewer. In the export folder
 
 *(Why the little server? Browsers block a page opened from disk (`file://`) from fetching a local `.glb`.
 The launcher serves the folder over `http://localhost:8000`, which is allowed.)*
+
+> **Why `model.glb` looks sharp (the precision story).** glTF stores vertex positions as **float32**. The
+> pipeline mesh is georeferenced in **UTM** (northing ~4.57e6); left at that magnitude, float32 resolves
+> only ~**0.5 m** steps, which bakes visible stair-stepping into the file. So the shipped `model.glb` is
+> **recentered to a local origin** (its coords sit within ±220 m of zero → float32 step ~**0.015 mm**), and
+> `model.glb.README.txt` records the exact UTM offset to add back. The other exports —
+> `model.gltf`/`.obj`/`.ply`, `points.las`/`.laz`, `s9_geo/*.tif` — are left **georeferenced in UTM** and
+> are the ones to use for measurement/GIS. If you ever regenerate the display `.glb` from the full-precision
+> `s8_mesh/mesh.ply` (which is `double`), recenter it **before** the float32 cast, not after.
 
 ### 8.2 In Blender
 
