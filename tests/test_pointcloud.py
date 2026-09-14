@@ -4,6 +4,7 @@ import pytest
 
 from drishti.io.pointcloud import (
     StreamingPlyWriter,
+    iter_ply_chunks,
     read_ply_points,
     write_obj_mesh,
     write_ply_points,
@@ -110,3 +111,41 @@ def test_streaming_writer_discards_on_exception(tmp_path):
         raise RuntimeError("boom")
     assert not p.exists()
     assert not (tmp_path / "boom.ply.body.tmp").exists()
+
+
+def test_iter_ply_chunks_matches_read_with_color(tmp_path):
+    # Streaming the cloud in several bounded chunks must reconstruct exactly what read_ply_points
+    # returns in one shot — that equivalence is what lets S9/S10 avoid loading the whole cloud.
+    rng = np.random.default_rng(0)
+    pts = rng.uniform(-10, 10, size=(50, 3))
+    cols = rng.integers(0, 256, size=(50, 3)).astype(float)
+    p = tmp_path / "chunky.ply"
+    write_ply_points(p, pts, cols)
+
+    chunks = list(iter_ply_chunks(p, chunk_points=7))   # 50/7 -> 8 chunks incl. a short final one
+    assert len(chunks) == 8
+    r = np.vstack([cp for cp, _ in chunks])
+    c = np.vstack([cc for _, cc in chunks])
+    full_p, full_c = read_ply_points(p)
+    assert r.dtype == np.float32 and c.dtype == np.uint8
+    assert np.allclose(r, full_p, atol=1e-5)
+    assert np.array_equal(c, full_c)
+
+
+def test_iter_ply_chunks_no_color(tmp_path):
+    pts = np.array([[0.0, 0.0, 0.0], [1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+    p = tmp_path / "nc.ply"
+    write_ply_points(p, pts)
+    chunks = list(iter_ply_chunks(p, chunk_points=2))
+    assert all(c is None for _, c in chunks)
+    assert np.allclose(np.vstack([cp for cp, _ in chunks]), pts, atol=1e-5)
+
+
+def test_iter_ply_chunks_single_chunk_covers_all(tmp_path):
+    pts = np.array([[0.0, 0.0, 0.0], [1.0, 2.0, 3.0]])
+    cols = np.array([[255, 0, 0], [0, 128, 255]], dtype=float)
+    p = tmp_path / "one.ply"
+    write_ply_points(p, pts, cols)
+    chunks = list(iter_ply_chunks(p, chunk_points=10_000))   # chunk >> n -> exactly one chunk
+    assert len(chunks) == 1
+    assert len(chunks[0][0]) == 2

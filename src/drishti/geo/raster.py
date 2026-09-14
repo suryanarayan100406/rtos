@@ -82,6 +82,73 @@ def ortho_grid(x, y, rgb, res: float, bounds=None):
     return np.clip(out.reshape(h, w, 3), 0, 255).astype(np.uint8), float(xmin), float(ymax)
 
 
+# --------------------------------------------------------------------------- streaming rasterization
+# The whole-array functions above hold every point in RAM at once. A 100M+-point aerial dense cloud
+# (plus the temporaries gridding allocates) blows past even a 30 GB host, and at 0.05 m over a ~1.2 km
+# scene the float64 ortho accumulator alone is ~15 GB. These helpers accumulate the SAME grids one
+# streamed point chunk at a time (see io.pointcloud.iter_ply_chunks): peak RAM tracks one chunk + the
+# (compact float32/uint32) output grids, never the whole cloud. Results are bit-for-bit identical to
+# elevation_grid / ortho_grid because per-cell max/min/sum are associative across chunks.
+
+
+def new_elevation_grid(h: int, w: int, agg: str) -> np.ndarray:
+    """Seed a flat (h*w) float32 reduction grid for streaming: -inf for max, +inf for min."""
+    if agg not in ("max", "min"):
+        raise ValueError(f"streaming elevation agg '{agg}' must be 'max' or 'min'")
+    return np.full(h * w, -np.inf if agg == "max" else np.inf, dtype=np.float32)
+
+
+def add_elevation(acc: np.ndarray, x, y, z, xmin: float, ymax: float, res: float,
+                  h: int, w: int, agg: str) -> None:
+    """Fold one point chunk into a reduction grid from :func:`new_elevation_grid` (in place)."""
+    row, col, ok = _cells(np.asarray(x, float), np.asarray(y, float), xmin, ymax, res, h, w)
+    flat = row[ok] * w + col[ok]
+    zz = np.asarray(z, float)[ok]
+    if agg == "max":
+        np.maximum.at(acc, flat, zz)
+    else:
+        np.minimum.at(acc, flat, zz)
+
+
+def finish_elevation(acc: np.ndarray, h: int, w: int) -> np.ndarray:
+    """Empty cells (still ±inf) -> NaN; return the HxW float32 grid."""
+    grid = np.where(np.isinf(acc), np.nan, acc)
+    return grid.reshape(h, w).astype(np.float32)
+
+
+def new_ortho_grid(h: int, w: int) -> tuple[np.ndarray, np.ndarray]:
+    """Seed (sum, count) accumulators for a streaming RGB mean: uint32 (h*w,3) sum + uint32 (h*w) count.
+
+    uint32 is exact and compact: a 5 cm cloud puts ~1 point in a 5 cm cell, so per-cell sums stay far
+    below 2^32 — half the RAM of a float64 accumulator and no floating-point rounding.
+    """
+    return np.zeros((h * w, 3), dtype=np.uint32), np.zeros(h * w, dtype=np.uint32)
+
+
+def add_ortho(sum_flat: np.ndarray, cnt_flat: np.ndarray, x, y, rgb, xmin: float, ymax: float,
+              res: float, h: int, w: int) -> None:
+    """Fold one point chunk (rgb in 0..255) into ortho (sum, count) accumulators (in place)."""
+    row, col, ok = _cells(np.asarray(x, float), np.asarray(y, float), xmin, ymax, res, h, w)
+    flat = row[ok] * w + col[ok]
+    c = np.asarray(rgb)[ok].astype(np.uint32, copy=False)
+    for k in range(3):
+        np.add.at(sum_flat[:, k], flat, c[:, k])
+    np.add.at(cnt_flat, flat, 1)
+
+
+def finish_ortho(sum_flat: np.ndarray, cnt_flat: np.ndarray, h: int, w: int) -> np.ndarray:
+    """Per-cell mean RGB -> (H,W,3) uint8. Channel-by-channel to keep the transient small; empty cells 0.
+
+    Integer floor(sum/count) equals ``ortho_grid``'s float mean truncated by ``astype(uint8)`` for these
+    non-negative values, so the orthomosaic is identical to the whole-array path.
+    """
+    cnt = np.maximum(cnt_flat, 1)  # avoid /0; empty cells have sum 0 -> 0
+    out = np.empty((h * w, 3), dtype=np.uint8)
+    for k in range(3):
+        out[:, k] = (sum_flat[:, k] // cnt).astype(np.uint8)
+    return out.reshape(h, w, 3)
+
+
 def morphological_dtm(dsm: np.ndarray, window_px: int) -> np.ndarray:
     """Estimate a bare-earth DTM from a DSM by grey-erosion (local min) then dilation (opening).
 

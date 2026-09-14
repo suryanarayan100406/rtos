@@ -47,7 +47,10 @@ def export_las(points, colors, dest: Path, epsg: int | None, point_format: str =
         except Exception:
             pass
     las = laspy.LasData(header)
-    pts = np.asarray(points, float)
+    # The dense cloud is stored float32, so an upcast to float64 here recovers no precision — it only
+    # doubles a 100M+-point array (~6 GB) for nothing. Feed float32 straight in; laspy still does the
+    # (value - offset) / scale scaling in float64 internally, so the written LAS coordinates are identical.
+    pts = np.asarray(points, dtype=np.float32)
     las.x, las.y, las.z = pts[:, 0], pts[:, 1], pts[:, 2]
     if colors is not None:
         c = np.asarray(colors)

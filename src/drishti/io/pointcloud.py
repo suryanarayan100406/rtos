@@ -147,33 +147,51 @@ def write_obj_mesh(path: str | Path, vertices: np.ndarray, faces: np.ndarray,
             f.write(f"f {tri[0] + 1} {tri[1] + 1} {tri[2] + 1}\n")
 
 
+# PLY scalar type -> numpy little-endian dtype, shared by the reader and the chunked iterator.
+_PLY_TYPE_MAP = {"float": "<f4", "float32": "<f4", "double": "<f8",
+                 "uchar": "u1", "uint8": "u1", "int": "<i4", "uint": "<u4"}
+
+
+def _parse_ply_header(f) -> tuple[str | None, int, list[tuple[str, str]]]:
+    """Parse a PLY header from a binary file at BOF; leaves ``f`` positioned at the first data byte.
+
+    Returns (format, vertex_count, [(prop_name, prop_type), ...] in file order for the vertex element).
+    """
+    if f.readline().strip() != b"ply":
+        raise ValueError("not a PLY file")
+    fmt: str | None = None
+    n = 0
+    props: list[tuple[str, str]] = []
+    while True:
+        line = f.readline().decode("ascii").strip()
+        if line.startswith("format"):
+            fmt = line.split()[1]
+        elif line.startswith("element vertex"):
+            n = int(line.split()[2])
+        elif line.startswith("element"):
+            # another element (e.g. faces) — stop collecting vertex props
+            pass
+        elif line.startswith("property") and n and not line.startswith("property list"):
+            _, ptype, pname = line.split()[:3]
+            props.append((pname, ptype))
+        elif line == "end_header":
+            break
+    return fmt, n, props
+
+
 def read_ply_points(path: str | Path) -> tuple[np.ndarray, np.ndarray | None]:
     """Read a PLY point cloud written by :func:`write_ply_points` (or a compatible one).
 
     Returns (points Nx3 float32, colors Nx3 uint8 or None). Supports binary_little_endian and ascii
-    with float x/y/z and optional uchar red/green/blue.
+    with float x/y/z and optional uchar red/green/blue. Loads the whole cloud into RAM — for a
+    hundred-million-point aerial dense cloud prefer :func:`iter_ply_chunks` (bounded RAM).
     """
     path = Path(path)
     with open(path, "rb") as f:
-        if f.readline().strip() != b"ply":
-            raise ValueError(f"not a PLY file: {path}")
-        fmt = None
-        n = 0
-        props: list[tuple[str, str]] = []
-        while True:
-            line = f.readline().decode("ascii").strip()
-            if line.startswith("format"):
-                fmt = line.split()[1]
-            elif line.startswith("element vertex"):
-                n = int(line.split()[2])
-            elif line.startswith("element"):
-                # another element (e.g. faces) — stop collecting vertex props
-                pass
-            elif line.startswith("property") and n and not line.startswith("property list"):
-                _, ptype, pname = line.split()[:3]
-                props.append((pname, ptype))
-            elif line == "end_header":
-                break
+        try:
+            fmt, n, props = _parse_ply_header(f)
+        except ValueError:
+            raise ValueError(f"not a PLY file: {path}") from None
         names = [p[0] for p in props]
         has_rgb = {"red", "green", "blue"}.issubset(names)
 
@@ -185,10 +203,50 @@ def read_ply_points(path: str | Path) -> tuple[np.ndarray, np.ndarray | None]:
             return pts, cols
 
         # binary_little_endian: build a struct dtype in property order
-        type_map = {"float": "<f4", "float32": "<f4", "double": "<f8",
-                    "uchar": "u1", "uint8": "u1", "int": "<i4", "uint": "<u4"}
-        dt = np.dtype([(nm, type_map[tp]) for nm, tp in props])
+        dt = np.dtype([(nm, _PLY_TYPE_MAP[tp]) for nm, tp in props])
         arr = np.frombuffer(f.read(dt.itemsize * n), dtype=dt, count=n)
         pts = np.column_stack([arr["x"], arr["y"], arr["z"]]).astype(np.float32)
         cols = np.column_stack([arr["red"], arr["green"], arr["blue"]]).astype(np.uint8) if has_rgb else None
         return pts, cols
+
+
+def iter_ply_chunks(path: str | Path, chunk_points: int = 8_000_000):
+    """Yield (points Nx3 float32, colors Nx3 uint8 or None) from a binary PLY in bounded-RAM chunks.
+
+    Same parsing as :func:`read_ply_points`, but the vertex body is read ``chunk_points`` at a time so
+    peak RAM tracks one chunk, not the whole cloud — the S7 dense cloud can be 100M+ points, which
+    OOM-kills any stage that materializes it all at once (S9 rasterization, S10 LAS). ASCII PLYs are
+    tiny/test-only and have no incremental win, so they fall back to a single whole-file read.
+    """
+    path = Path(path)
+    with open(path, "rb") as f:
+        try:
+            fmt, n, props = _parse_ply_header(f)
+        except ValueError:
+            raise ValueError(f"not a PLY file: {path}") from None
+        names = [p[0] for p in props]
+        has_rgb = {"red", "green", "blue"}.issubset(names)
+
+        if fmt == "ascii":
+            pts, cols = read_ply_points(path)
+            if len(pts):
+                yield pts, cols
+            return
+
+        dt = np.dtype([(nm, _PLY_TYPE_MAP[tp]) for nm, tp in props])
+        remaining = int(n)
+        step = max(1, int(chunk_points))
+        while remaining > 0:
+            want = min(step, remaining)
+            buf = f.read(dt.itemsize * want)
+            got = len(buf) // dt.itemsize
+            if got == 0:
+                break  # truncated file — stop rather than emit garbage
+            arr = np.frombuffer(buf, dtype=dt, count=got)
+            pts = np.column_stack([arr["x"], arr["y"], arr["z"]]).astype(np.float32, copy=False)
+            cols = (np.column_stack([arr["red"], arr["green"], arr["blue"]]).astype(np.uint8, copy=False)
+                    if has_rgb else None)
+            yield pts, cols
+            remaining -= got
+            if got < want:
+                break

@@ -284,7 +284,7 @@ and exit criteria: [`docs/implementation/01-IMPLEMENTATION-PLAN.md`](docs/implem
 
 **What "in progress" means here (honest):** the *code* for all 11 stages (S0–S10 + report) is written
 with real tools and guarded imports — **no stubs, no fake outputs**. The pure logic and core machinery
-are unit-tested (**112 tests passing, ruff clean**; a pre-existing `test_server` collection error —
+are unit-tested (**127 tests passing, ruff clean**; a pre-existing `test_server` collection error —
 the FastAPI `server` package not on this env's `PYTHONPATH` — is unrelated to the pipeline and tracked
 separately). What remains is **end-to-end validation on real
 footage with the heavy extras installed**, which needs the cloud-T4 / Docker environment (no local
@@ -338,7 +338,22 @@ and (b) a 297 m scene at `poisson_depth=11` resolves only ~16 cm, so the 5 cm cl
 mesh can represent — meshing all of it OOMs for detail Poisson smooths away. **Fixed:** S8 now downsamples
 the *meshing input* to the octree-leaf size (auto from depth+extent, clamped ≥ dense voxel — the 5 cm
 `dense.ply` product is untouched) and orients normals with the O(N) aerial up-prior above a point threshold.
-Voxel/`depth_trunc` for the dense product unchanged. Awaits an end-to-end run for verification.
+Voxel/`depth_trunc` for the dense product unchanged. That fix held — the next log
+(`notebooks/8.txt`) shows the kill **advanced past s8 into s9_geo** (still `exit -9` on ~30 GB, and
+tellingly with the **T4 idle**, because s9 is `cpu_only`). Root-caused (§9 2026-09-15) to the georaster
+stage being the **last whole-cloud consumer**: it called `read_ply_points` to pull all ~249 M points
+into RAM at once and then ran full-array float64 passes, **and** allocated a float64 ortho accumulator
+(`h·w·3`) that at 0.05 m over a ~1.2 km scene is **~14.6 GB by itself**. **Fixed** by making s9 stream
+like s7: it now folds the cloud into the DSM/DTM/ortho grids **one bounded `iter_ply_chunks` chunk at a
+time** (scene extent read from S7's tracked `bbox`, so no pre-pass), scatter-accumulating into compact
+**float32 elevation / uint32 ortho-sum+count** grids — peak RAM drops from >30 GB to one chunk + the
+grids (a few GB), the GPU stays deliberately unused (a 16 GB T4 can't fix a host-RAM ceiling and cupy
+would only add fragile deps), and the GeoTIFFs are **bit-identical** to the whole-array path (proven by
+parametrized equivalence unit-tests + an on-disk end-to-end check; integer `floor(sum/cnt)` equals the
+old float mean truncated to uint8). The same pass trimmed s10's `export_las` float64 upcast to float32
+(quality-neutral — the dense cloud is already float32 and laspy scales in float64 internally, so written
+LAS coords are unchanged) and corrected the notebook's stale "OOM-killed s7_dense" messages to
+host-RAM/streaming-aware wording. Awaits an end-to-end run for verification.
 Infrastructure and all stage code are in place and unit-green, and **realistic inputs now
 exist on demand** via `scripts/make_sample_dataset.py` (real OpenDroneMap imagery + real GPS EXIF, or a
 ground-truth synthetic city for accuracy checks). The real registry now includes **`waterbury`** — a real
@@ -370,6 +385,45 @@ list of what's done vs. remaining directly under this table.
 ---
 
 ## 9. Decision log (append-only)
+
+- **2026-09-15 — fifth OOM, in `s9_geo`: stream the georaster like S7 (no whole-cloud load, float32/uint32
+  grids). Quality-neutral, no GPU.** `notebooks/8.txt` shows `exit -9` on a ~30 GB runtime with the **T4
+  idle** — the idle GPU is the tell: `GeoStage` is `ComputeNeed(cpu_only=True)`, so the crash is host-RAM,
+  not compute, and "use the GPU" does not apply (a 16 GB T4 can't hold what 30 GB of host RAM couldn't, and
+  cupy would add fragile deps for no RAM relief). The notebook's message blamed `s7_dense`, but s7 completed
+  in 6.txt and s8 completed to even reach s9 — s9 was simply the **last stage still consuming the whole
+  cloud**. Two drivers: (1) `read_ply_points` loaded all **249,234,507** points at once (~3.7 GB of bytes
+  plus copies) and then ran full-array **float64** passes; (2) the ortho accumulator was `np.zeros((h·w,3))`
+  in **float64**, which at `ortho_res=0.05 m` over a ~1.2 km scene (~24.6 k² cells) is **~14.6 GB on its
+  own**. **Fix (mirrors the S7 streaming pattern):**
+  - `io/pointcloud.py`: factored the PLY header parse into `_parse_ply_header` and added
+    **`iter_ply_chunks(path, chunk_points=8_000_000)`** — yields `(pts float32, cols uint8|None)` in
+    bounded slices straight from the binary body (ASCII PLYs fall back to the one-shot reader). This is the
+    shared "read the cloud without holding it" primitive S9 (and later S10) build on.
+  - `geo/raster.py`: added streaming accumulators alongside the untouched whole-array funcs (kept for
+    tests/back-compat) — `new_elevation_grid`/`add_elevation`/`finish_elevation` (float32, `np.maximum.at`/
+    `np.minimum.at` for DSM max / DTM-base min) and `new_ortho_grid`/`add_ortho`/`finish_ortho` (uint32
+    per-cell RGB **sum + count**, finished as `floor(sum/cnt)`). These reductions are associative, so
+    chunked folding is **bit-identical** to the whole-array path: `finish_ortho`'s integer floor equals the
+    old float mean truncated by `astype(uint8)` for non-negative RGB — verified by parametrized equivalence
+    unit-tests (`np.array_equal` on ortho; NaN-mask + `allclose` on elevation) **and** an on-disk E2E check.
+  - `stages/s9_geo.py`: `run()` now takes scene extent from S7's tracked `dense.bbox_min/max` (new module
+    `_bounds_from_cloud` is a cheap coords-only fallback for pre-bbox bundles — still streamed, never a full
+    load), seeds the three grids, and folds the cloud in **one** `iter_ply_chunks` loop, `del`-ing each
+    chunk and freeing each accumulator as its GeoTIFF is written. Peak RAM = one chunk + the grids (a few
+    GB), down from >30 GB. `dense.ply` and every output resolution (5 cm dense, `dsm/dtm/ortho_res`) are
+    unchanged — this is purely a memory-layout fix.
+  - `io/exporters.py`: `export_las` now feeds points as **float32** instead of upcasting to float64 — the
+    dense cloud is already float32 so the upcast recovered zero precision while doubling a ~6 GB array;
+    laspy still applies `(value − offset)/scale` in float64 internally, so the written LAS coordinates are
+    identical. (S10's laspy path is otherwise left non-chunked; its ~22 GB peak fits 30 GB, and the chunked
+    laspy API isn't locally testable.)
+  - `notebooks/drishti_colab_full.ipynb`: corrected the two stale "OOM-killed s7_dense" / "OOM at s7_dense"
+    messages (6B code print + the §6 markdown caveat) to say the `exit -9` is a **host-RAM** kill and that
+    **s7 tiles and s9/s10 stream** the 100M+-point cloud, so 5 cm fits ~30 GB (edit preserved CRLF /
+    `indent=1` / `ensure_ascii=False`; +300 bytes, JSON still valid).
+  - **Tests:** 112 → **127 passing, ruff clean** (added `iter_ply_chunks` round-trip tests and streaming
+    ↔ whole-array equivalence tests for both elevation and ortho). Awaits an E2E cloud run for final proof.
 
 - **2026-09-14 (#6) — new REAL dataset `waterbury` (a town with many buildings, ~124 s video).** Adds
   `waterbury` to the real `REGISTRY` in `scripts/make_sample_dataset.py`

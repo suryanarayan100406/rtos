@@ -2,7 +2,18 @@
 import numpy as np
 import pytest
 
-from drishti.geo.raster import elevation_grid, grid_shape, morphological_dtm, ortho_grid
+from drishti.geo.raster import (
+    add_elevation,
+    add_ortho,
+    elevation_grid,
+    finish_elevation,
+    finish_ortho,
+    grid_shape,
+    morphological_dtm,
+    new_elevation_grid,
+    new_ortho_grid,
+    ortho_grid,
+)
 
 
 def test_grid_shape():
@@ -61,3 +72,54 @@ def test_morphological_dtm_removes_structure():
 def test_morphological_dtm_window_one_is_identity():
     dsm = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
     assert np.array_equal(morphological_dtm(dsm, window_px=1), dsm)
+
+
+# --- streaming rasterization must equal the whole-array path (S9 folds the cloud in chunks) ----------
+
+def _stream_elevation(x, y, z, res, agg, bounds, nchunks):
+    xmin, ymin, xmax, ymax = bounds
+    h, w = grid_shape(xmin, ymin, xmax, ymax, res)
+    acc = new_elevation_grid(h, w, agg)
+    for xi, yi, zi in zip(np.array_split(x, nchunks), np.array_split(y, nchunks),
+                          np.array_split(z, nchunks)):
+        add_elevation(acc, xi, yi, zi, xmin, ymax, res, h, w, agg)
+    return finish_elevation(acc, h, w)
+
+
+@pytest.mark.parametrize("agg", ["max", "min"])
+def test_streaming_elevation_matches_whole_array(agg):
+    rng = np.random.default_rng(1)
+    x = rng.uniform(0, 20, 500)
+    y = rng.uniform(0, 15, 500)
+    z = rng.uniform(0, 100, 500)
+    bounds = (0.0, 0.0, 20.0, 15.0)          # fixed bounds -> both paths grid identically
+    whole, _, _ = elevation_grid(x, y, z, res=1.0, agg=agg, bounds=bounds)
+    streamed = _stream_elevation(x, y, z, 1.0, agg, bounds, nchunks=3)
+    assert streamed.shape == whole.shape
+    assert np.array_equal(np.isnan(streamed), np.isnan(whole))     # same empty cells
+    m = ~np.isnan(whole)
+    assert np.allclose(streamed[m], whole[m])
+
+
+def test_streaming_ortho_matches_whole_array():
+    rng = np.random.default_rng(2)
+    x = rng.uniform(0, 10, 400)
+    y = rng.uniform(0, 10, 400)
+    rgb = rng.integers(0, 256, size=(400, 3)).astype(np.uint8)     # 0..255 -> no unit-scale branch
+    bounds = (0.0, 0.0, 10.0, 10.0)
+    whole, _, _ = ortho_grid(x, y, rgb, res=1.0, bounds=bounds)
+
+    xmin, ymin, xmax, ymax = bounds
+    h, w = grid_shape(xmin, ymin, xmax, ymax, 1.0)
+    osum, ocnt = new_ortho_grid(h, w)
+    for xi, yi, ci in zip(np.array_split(x, 4), np.array_split(y, 4), np.array_split(rgb, 4)):
+        add_ortho(osum, ocnt, xi, yi, ci, xmin, ymax, 1.0, h, w)
+    streamed = finish_ortho(osum, ocnt, h, w)
+
+    assert streamed.dtype == np.uint8 and streamed.shape == whole.shape
+    assert np.array_equal(streamed, whole)     # integer floor(sum/cnt) == float mean truncated to uint8
+
+
+def test_new_elevation_grid_rejects_bad_agg():
+    with pytest.raises(ValueError):
+        new_elevation_grid(3, 3, "mean")
